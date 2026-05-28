@@ -7,6 +7,7 @@ import { App, type Installation } from "@slack/bolt";
 
 import InstallationModel from "./models/Installation.model.js";
 import { generateRunbook } from "./services/aiEngine.js";
+import { detectionIncident } from "./services/aiEngine.js";
 import { readFullThread } from "./services/slackReader.js";
 import { RunbookModel } from "./models/Runbook.model.js";
 
@@ -114,24 +115,23 @@ bolt.event("message", async ({ event, say }) => {
     const user = event.user;
     const channel = event.channel;
 
-    console.log(`Message from ${user} in ${channel}: ${text}`);
+    if (!text || text.length < 5) return;
 
-    const resolutionKeywords = [
-        'resolved',
-        'fixed',
-        'root cause',
-        'closing this',
-        'back to normal',
-        'issue is resolved'
-    ];
+    const detection = await detectionIncident(text);
 
-    const isResolution = resolutionKeywords.some(keyword =>
-        text.toLowerCase().includes(keyword)
-    );
+    console.log(`🔍 Detection: isIncident=${detection.isIncident}, isResolved=${detection.isResolved}, confidence=${detection.confidence}`);
+    console.log(`Reason: ${detection.reason}`);
 
-    if (!isResolution) return;
+    if (!detection.isIncident || detection.confidence < 0.7) {
+        return;
+    }
 
-    console.log("🔥 Incident resolution detected - starting runbook generation...");
+    if (!detection.isResolved) {
+        console.log(`📌 ${detection.incidentType.toUpperCase()} incident in progress — monitoring...`);
+        return;
+    }
+
+    console.log(`🔥 ${detection.incidentType.toUpperCase()} incident resolved — generating runbook...`);
 
     try {
         const teamId = event.team;
@@ -232,11 +232,12 @@ bolt.action("approve_runbook", async ({ ack, body, client }) => {
 
     const runbook = JSON.parse((body as any).actions[0].value);
     const approvedBy = body.user.id;
+    const teamId = (body as any).team?.id;
 
     console.log("✅ Engineer approved runbook:", runbook.title);
 
     await RunbookModel.create({
-        teamId: (body as any).team?.id,
+        teamId,
         title: runbook.title,
         severity: runbook.severity,
         overview: runbook.overview,
