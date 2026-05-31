@@ -10,7 +10,7 @@ import { generateRunbook } from "./services/aiEngine.js";
 import { detectionIncident } from "./services/aiEngine.js";
 import { readFullThread } from "./services/slackReader.js";
 import { RunbookModel } from "./models/Runbook.model.js";
-import { searchRunbooks } from "./services/runbookSearch.js";
+import { searchRunbooks, findSimilarRunbooks } from "./services/runbookSearch.js";
 
 dotenv.config();
 
@@ -129,7 +129,122 @@ bolt.event("message", async ({ event, say }) => {
     }
 
     if (!detection.isResolved) {
-        console.log(`📌 ${detection.incidentType.toUpperCase()} incident in progress — monitoring...`);
+        try {
+            const teamId = event.team;
+            if (!teamId) return;
+            const installation = await InstallationModel.findOne({ teamId });
+            if (!installation) return;
+
+            const token = installation.botToken;
+
+            const similarRunbooks = await findSimilarRunbooks(
+                text,
+                detection.incidentType,
+                teamId
+            );
+
+            if (similarRunbooks.length === 0) {
+                console.log("No similar past incidents found");
+                return;
+            }
+
+            console.log(`📚 Found ${similarRunbooks.length} similar past incidents — posting to channel`);
+
+            const webClient = new WebClient(token);
+
+            const similarBlocks: any[] = [
+                {
+                    type: "section",
+                    text: {
+                        type: "mrkdwn",
+                        text: `🔁 *RunbookAI — Similar past incident${similarRunbooks.length > 1 ? "s" : ""} found*\n\nThis might help resolve the current incident faster:`
+                    }
+                },
+                { type: "divider" }
+            ];
+
+            similarRunbooks.forEach((runbook, index) => {
+                const severityEmoji = {
+                    high: "🔴",
+                    medium: "🟡",
+                    low: "🟢"
+                }[runbook.severity?.toLowerCase()] || "⚪";
+
+                const date = runbook.createdAt
+                    ? new Date(runbook.createdAt).toLocaleDateString("en-GB", {
+                        day: "numeric",
+                        month: "short",
+                        year: "numeric"
+                    })
+                    : "Unknown date";
+
+                similarBlocks.push({
+                    type: "section",
+                    fields: [
+                        {
+                            type: "mrkdwn",
+                            text: `*${index + 1}. ${runbook.title}*`
+                        },
+                        {
+                            type: "mrkdwn",
+                            text: `${severityEmoji} ${runbook.severity?.toUpperCase()} — ${date}`
+                        }
+                    ]
+                });
+
+                similarBlocks.push({
+                    type: "section",
+                    text: {
+                        type: "mrkdwn",
+                        text: `*Root Cause:* ${runbook.rootCause || "Not specified"}`
+                    }
+                });
+
+                if (runbook.actionsTaken?.length > 0) {
+                    const actions = runbook.actionsTaken
+                        .map((action: string, i: number) => `${i + 1}. ${action}`)
+                        .join("\n");
+
+                    similarBlocks.push({
+                        type: "section",
+                        text: {
+                            type: "mrkdwn",
+                            text: `*How it was fixed:*\n${actions}`
+                        }
+                    });
+                }
+
+                if (runbook.preventionSteps?.length > 0) {
+                    const steps = runbook.preventionSteps
+                        .map((step: string, i: number) => `${i + 1}. ${step}`)
+                        .join("\n");
+
+                    similarBlocks.push({
+                        type: "section",
+                        text: {
+                            type: "mrkdwn",
+                            text: `*Prevention steps:*\n${steps}`
+                        }
+                    });
+                }
+
+                if (index < similarRunbooks.length - 1) {
+                    similarBlocks.push({ type: "divider" });
+                }
+            });
+
+            await webClient.chat.postMessage({
+                channel,
+                text: `🔁 RunbookAI found ${similarRunbooks.length} similar past incident(s)`,
+                blocks: similarBlocks
+            });
+
+            console.log("✅ Similar runbooks posted to channel");
+
+        } catch (error) {
+            console.error("Error finding similar runbooks:", error);
+        }
+
         return;
     }
 
