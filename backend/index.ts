@@ -116,6 +116,7 @@ bolt.event("message", async ({ event, say }) => {
     const channel = event.channel;
 
     if (!text || text.length < 5) return;
+    if (!user || user === "") return;
 
     const detection = await detectionIncident(text);
 
@@ -165,10 +166,44 @@ bolt.event("message", async ({ event, say }) => {
 
         console.log("✅ Runbook generated:", runbook);
 
+        let approvalTarget = user;
+
+        if (runbook.owner) {
+            const ownerFromThread = messages.find((msg: string) =>
+                msg.toLowerCase().includes(runbook.owner.toLowerCase())
+            );
+
+            if (ownerFromThread) {
+                const ownerId = ownerFromThread.split(":")[0]?.trim();
+                if (ownerId && ownerId.startsWith("U")) {
+                    approvalTarget = ownerId;
+                    console.log(`📨 Sending to Gemini-identified owner: ${ownerId}`);
+                }
+            }
+        }
+
+        if (approvalTarget === user) {
+            const messageCounts = new Map<string, number>();
+            messages.forEach(msg => {
+                const userId = msg.split(":")[0]?.trim();
+                if (userId?.startsWith("U")) {
+                    messageCounts.set(userId, (messageCounts.get(userId) || 0) + 1);
+                }
+            });
+
+            let maxCount = 0;
+            messageCounts.forEach((count, userId) => {
+                if (count > maxCount) {
+                    maxCount = count;
+                    approvalTarget = userId;
+                }
+            });
+        }
+
         const client = new WebClient(botToken as string);
 
         await client.chat.postMessage({
-            channel: user,
+            channel: approvalTarget,
             text: 'RunbookAI — Runbook Draft Ready',
             blocks: [
                 {
