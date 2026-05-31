@@ -79,6 +79,7 @@ const technicalWords = [
   'slow', 'timeout', 'issue', 'problem', 'not working',
   'outage', 'alert', 'incident', 'resolved', 'fixed',
   'restored', 'investigating', 'memory', 'cpu', 'disk',
+  'killed', 'analytics', 'connection limit', 'dropping', 'root cause found',
   '500', '502', '503', '504', 'latency', 'database'
 ];
 

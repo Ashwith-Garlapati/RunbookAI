@@ -10,6 +10,7 @@ import { generateRunbook } from "./services/aiEngine.js";
 import { detectionIncident } from "./services/aiEngine.js";
 import { readFullThread } from "./services/slackReader.js";
 import { RunbookModel } from "./models/Runbook.model.js";
+import { searchRunbooks } from "./services/runbookSearch.js";
 
 dotenv.config();
 
@@ -302,6 +303,163 @@ bolt.action("reject_runbook", async ({ ack, body, client }) => {
     await client.chat.postMessage({
         channel: body.user.id,
         text: `Runbook rejected and discarded.`
+    });
+});
+
+bolt.command("/runbook", async ({ command, ack, client }) => {
+    await ack();
+
+    const fullText = command.text.trim();
+    const userId = command.user_id;
+    const teamId = command.team_id;
+    const channelId = command.channel_id;
+
+    console.log(`/runbook command received: "${fullText}" from ${userId}`);
+
+    const parts = fullText.split(" ");
+    const subcommand = parts[0]?.toLowerCase();
+    const query = parts.slice(1).join(" ").trim();
+
+    if (subcommand === "search") {
+
+        if (!query) {
+            await client.chat.postEphemeral({
+                channel: channelId,
+                user: userId,
+                text: "Please provide a search term. Example: `/runbook search DB connection`"
+            });
+            return;
+        }
+
+        try {
+            const results = await searchRunbooks(query, teamId);
+
+            if (results.length === 0) {
+                await client.chat.postEphemeral({
+                    channel: channelId,
+                    user: userId,
+                    text: `🔍 No runbooks found for "*${query}*". Try a different search term.`
+                });
+                return;
+            }
+
+            const resultBlocks: any[] = [
+                {
+                    type: "section",
+                    text: {
+                        type: "mrkdwn",
+                        text: `🔍 *Found ${results.length} runbook${results.length > 1 ? "s" : ""} for "${query}":*`
+                    }
+                },
+                { type: "divider" }
+            ];
+
+            results.forEach((runbook, index) => {
+                const severityEmoji = {
+                    high: "🔴",
+                    medium: "🟡",
+                    low: "🟢"
+                }[runbook.severity?.toLowerCase()] || "⚪";
+
+                const date = runbook.createdAt
+                    ? new Date(runbook.createdAt).toLocaleDateString("en-GB", {
+                        day: "numeric",
+                        month: "short",
+                        year: "numeric"
+                    })
+                    : "Unknown date";
+
+                resultBlocks.push({
+                    type: "section",
+                    fields: [
+                        {
+                            type: "mrkdwn",
+                            text: `*${index + 1}. ${runbook.title}*`
+                        },
+                        {
+                            type: "mrkdwn",
+                            text: `${severityEmoji} ${runbook.severity?.toUpperCase() || "UNKNOWN"}`
+                        },
+                        {
+                            type: "mrkdwn",
+                            text: `*Root Cause:*\n${runbook.rootCause || "Not specified"}`
+                        },
+                        {
+                            type: "mrkdwn",
+                            text: `*Date:*\n${date}`
+                        }
+                    ]
+                });
+
+                resultBlocks.push({
+                    type: "section",
+                    text: {
+                        type: "mrkdwn",
+                        text: `*Overview:* ${runbook.overview || "No overview available"}`
+                    }
+                });
+
+                if (runbook.preventionSteps?.length > 0) {
+                    const steps = runbook.preventionSteps
+                        .map((step, i) => `${i + 1}. ${step}`)
+                        .join("\n");
+
+                    resultBlocks.push({
+                        type: "section",
+                        text: {
+                            type: "mrkdwn",
+                            text: `*Prevention Steps:*\n${steps}`
+                        }
+                    });
+                }
+
+                if (index < results.length - 1) {
+                    resultBlocks.push({ type: "divider" });
+                }
+            });
+
+            // Send results — ephemeral means only the user who typed the command sees it
+            await client.chat.postEphemeral({
+                channel: channelId,
+                user: userId,
+                text: `Found ${results.length} runbooks for "${query}"`,
+                blocks: resultBlocks
+            });
+
+            console.log(`✅ Sent ${results.length} search results to ${userId}`);
+
+        } catch (error) {
+            console.error("Search error:", error);
+            await client.chat.postEphemeral({
+                channel: channelId,
+                user: userId,
+                text: "❌ Search failed. Please try again."
+            });
+        }
+        return;
+    }
+
+    // ── /runbook (no subcommand) — show help
+    await client.chat.postEphemeral({
+        channel: channelId,
+        user: userId,
+        text: "🤖 *RunbookAI Commands*",
+        blocks: [
+            {
+                type: "section",
+                text: {
+                    type: "mrkdwn",
+                    text: "🤖 *RunbookAI — Available Commands*"
+                }
+            },
+            {
+                type: "section",
+                text: {
+                    type: "mrkdwn",
+                    text: "`/runbook search [query]` — Search runbooks by keyword\n*Example:* `/runbook search DB connection`"
+                }
+            }
+        ]
     });
 });
 
