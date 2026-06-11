@@ -533,7 +533,7 @@ bolt.command("/runbook", async ({ command, ack, client }) => {
                 }
             });
 
-            // Send results — ephemeral means only the user who typed the command sees it
+            // Send results ephemeral means only the user who typed the command sees it
             await client.chat.postEphemeral({
                 channel: channelId,
                 user: userId,
