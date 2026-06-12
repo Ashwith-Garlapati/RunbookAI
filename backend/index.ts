@@ -578,17 +578,6 @@ bolt.command("/runbook", async ({ command, ack, client }) => {
     });
 });
 
-// app.post("/", async (req, res) => {
-//     //connect to slack using their Events API✅
-
-//     //connect to an ai llm model
-
-//     //go through the conversation in the slack and check for incidents and only specific events
-
-//     //Trigger the Logic --> checks for tags like fixed, resolved, root cause
-
-// });
-
 const start = async () => {
     await connectDB();
     await bolt.start(3001);
