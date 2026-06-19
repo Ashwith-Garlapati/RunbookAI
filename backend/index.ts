@@ -4,13 +4,26 @@ import dotenv from "dotenv";
 import mongoose from "mongoose";
 import { WebClient } from "@slack/web-api";
 import { App, type Installation } from "@slack/bolt";
+import { Octokit } from "@octokit/rest";
 
 import InstallationModel from "./models/Installation.model.js";
-import { generateRunbook } from "./services/aiEngine.js";
+import { generateRunbook, type GeneratedPRRunbook } from "./services/aiEngine.js";
 import { detectionIncident } from "./services/aiEngine.js";
 import { readFullThread } from "./services/slackReader.js";
 import { RunbookModel } from "./models/Runbook.model.js";
 import { searchRunbooks, findSimilarRunbooks } from "./services/runbookSearch.js";
+import {
+    isHotfixPR,
+    verifyGitHubSignature,
+    extractPRData
+} from "./services/githubWebhook.js";
+import {
+    publishToGitHub,
+    postRunbookComment,
+    deleteComment,
+    postStatusComment
+} from "./services/githubPublisher.js";
+import { generateRunbookFromPR } from "./services/aiEngine.js";
 
 dotenv.config();
 
@@ -19,10 +32,22 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
-app.use(express.json());
+app.use((req, res, next) => {
+    if (req.path === "/github/webhook") {
+        next();
+    } else {
+        express.json()(req, res, next);
+    }
+});
 
+if (!process.env.GITHUB_TOKEN) {
+    console.error("GITHUB_TOKEN is required");
+    process.exit(1);
+}
 
-const connectDB = async () => {
+const octokit = new Octokit({
+    auth: process.env.GITHUB_TOKEN
+}); const connectDB = async () => {
     await mongoose.connect(process.env.MONGODB_URI || "").then(() => {
         console.log("Connected to MongoDB");
     }).catch(async (error) => {
@@ -533,7 +558,6 @@ bolt.command("/runbook", async ({ command, ack, client }) => {
                 }
             });
 
-            // Send results — ephemeral means only the user who typed the command sees it
             await client.chat.postEphemeral({
                 channel: channelId,
                 user: userId,
@@ -554,7 +578,60 @@ bolt.command("/runbook", async ({ command, ack, client }) => {
         return;
     }
 
-    // ── /runbook (no subcommand) — show help
+    if (subcommand === "github-link") {
+        if (!query) {
+            await client.chat.postEphemeral({
+                channel: channelId,
+                user: userId,
+                text: "Please provide a GitHub org or owner name. Example: `/runbook github-link my-org`"
+            });
+            return;
+        }
+
+        const orgName = query.toLowerCase();
+
+        try {
+            const installation = await InstallationModel.findOne({ teamId });
+            if (!installation) {
+                await client.chat.postEphemeral({
+                    channel: channelId,
+                    user: userId,
+                    text: "❌ No Slack installation found for this workspace. Please reinstall RunbookAI."
+                });
+                return;
+            }
+
+            if (installation.githubOrgs.includes(orgName)) {
+                await client.chat.postEphemeral({
+                    channel: channelId,
+                    user: userId,
+                    text: `ℹ️ GitHub org \`${orgName}\` is already linked to this workspace.`
+                });
+                return;
+            }
+
+            installation.githubOrgs.push(orgName);
+            await installation.save();
+
+            await client.chat.postEphemeral({
+                channel: channelId,
+                user: userId,
+                text: `GitHub org \`${orgName}\` is now linked to this Slack workspace.\n\nHotfix PRs from \`${orgName}\` repos will generate runbooks here.`
+            });
+
+            console.log(`Linked GitHub org "${orgName}" to team ${teamId}`);
+
+        } catch (error) {
+            console.error("GitHub link error:", error);
+            await client.chat.postEphemeral({
+                channel: channelId,
+                user: userId,
+                text: "Failed to link GitHub org. Please try again."
+            });
+        }
+        return;
+    }
+
     await client.chat.postEphemeral({
         channel: channelId,
         user: userId,
@@ -573,21 +650,184 @@ bolt.command("/runbook", async ({ command, ack, client }) => {
                     type: "mrkdwn",
                     text: "`/runbook search [query]` — Search runbooks by keyword\n*Example:* `/runbook search DB connection`"
                 }
+            },
+            {
+                type: "section",
+                text: {
+                    type: "mrkdwn",
+                    text: "`/runbook github-link [org]` — Link a GitHub org to this workspace\n*Example:* `/runbook github-link my-org`"
+                }
             }
         ]
     });
 });
 
-// app.post("/", async (req, res) => {
-//     //connect to slack using their Events API✅
+app.post("/github/webhook", express.raw({ type: "application/json" }), async (req, res) => {
 
-//     //connect to an ai llm model
+    const signature = req.headers["x-hub-signature-256"] as string;
+    if (!signature) { res.status(401).send("Unauthorized"); return; }
 
-//     //go through the conversation in the slack and check for incidents and only specific events
+    const isValid = verifyGitHubSignature(req.body.toString(), signature);
+    if (!isValid) { res.status(401).send("Unauthorized"); return; }
 
-//     //Trigger the Logic --> checks for tags like fixed, resolved, root cause
+    let payload;
+    try {
+        payload = JSON.parse(req.body.toString());
+    } catch (e) {
+        res.status(400).send("Bad Request");
+        return;
+    }
 
-// });
+    const event = req.headers["x-github-event"];
+    console.log(`📦 GitHub event received: ${event}`);
+
+    if (event === "issue_comment" && payload.action === "created") {
+        const commentBody = payload.comment?.body?.trim().toLowerCase();
+        const commenter = payload.comment?.user?.login;
+        const prNumber = payload.issue?.number;
+        const repoOwner = payload.repository?.owner?.login;
+        const repoName = payload.repository?.name;
+
+        if (commentBody !== "approve" && commentBody !== "reject") {
+            res.status(200).send("OK");
+            return;
+        }
+
+        if (payload.comment?.user?.type === "Bot") {
+            res.status(200).send("OK");
+            return;
+        }
+
+        res.status(200).send("OK");
+
+        try {
+            const comments = await octokit.issues.listComments({
+                owner: repoOwner,
+                repo: repoName,
+                issue_number: prNumber,
+                per_page: 100
+            });
+
+            const runbookComment = comments.data.find(c =>
+                c.body?.includes("<!--RUNBOOK_DATA:")
+            );
+
+            if (!runbookComment) {
+                console.log(`No RunbookAI comment found on PR #${prNumber}`);
+                return;
+            }
+
+            const match = runbookComment.body?.match(/<!--RUNBOOK_DATA:(.*?)-->/s);
+            if (!match) {
+                console.log("Could not extract runbook data");
+                return;
+            }
+
+            const runbook = JSON.parse(match[1] ?? "{}") as GeneratedPRRunbook;
+            console.log(`Extracted runbook: ${runbook.title}`);
+
+            if (commentBody === "approve") {
+                console.log(`✅ ${commenter} approved the runbook`);
+
+                // Look up the Slack team linked to this GitHub org
+                const linkedInstallation = await InstallationModel.findOne({
+                    githubOrgs: repoOwner.toLowerCase()
+                });
+                const teamId = linkedInstallation?.teamId;
+                if (!teamId) {
+                    console.log(`⚠️ No Slack workspace linked to GitHub org "${repoOwner}" — runbook will not be searchable via Slack`);
+                }
+
+                await RunbookModel.create({
+                    ...(teamId ? { teamId } : {}),
+                    title: runbook.title,
+                    severity: runbook.severity,
+                    overview: runbook.overview,
+                    rootCause: runbook.rootCause,
+                    actionsTaken: runbook.actionsTaken,
+                    preventionSteps: runbook.preventionSteps,
+                    keyEvents: runbook.keyEvents || [],
+                    owner: runbook.owner,
+                    approvedBy: commenter,
+                    source: "github_pr"
+                });
+                console.log("💾 Saved to MongoDB");
+
+                let githubUrl = null;
+                try {
+                    githubUrl = await publishToGitHub(runbook, commenter, repoOwner, repoName);
+                    console.log("🐙 Published to GitHub:", githubUrl);
+                } catch (error) {
+                    console.error("GitHub publish failed:", error);
+                }
+
+                await postStatusComment(
+                    prNumber, "approved",
+                    runbook.title, githubUrl,
+                    repoOwner, repoName
+                );
+
+            } else if (commentBody === "reject") {
+                console.log(`❌ ${commenter} rejected the runbook`);
+
+                await postStatusComment(
+                    prNumber, "rejected",
+                    runbook.title, null,
+                    repoOwner, repoName
+                );
+            }
+
+            await deleteComment(runbookComment.id, repoOwner, repoName);
+
+        } catch (error) {
+            console.error("Error processing comment:", error);
+        }
+
+        return;
+    }
+
+    if (event !== "pull_request" || payload.action !== "closed" || !payload.pull_request?.merged) {
+        res.status(200).send("OK");
+        return;
+    }
+
+    console.log(`PR merged: "${payload.pull_request.title}"`);
+
+    const prData = extractPRData(payload);
+
+    if (!isHotfixPR(prData)) {
+        console.log("PR is not a hotfix — skipping");
+        res.status(200).send("OK");
+        return;
+    }
+
+    console.log("Hotfix PR detected — generating runbook...");
+    res.status(200).send("OK");
+
+    try {
+        const runbook = await generateRunbookFromPR(prData);
+
+        if (!runbook) {
+            console.log("Failed to generate runbook from PR");
+            return;
+        }
+
+        console.log("Runbook generated from PR:", runbook.title);
+
+        // ✅ CHANGED — post as PR comment instead of Slack DM only
+        await postRunbookComment(
+            payload.pull_request.number,
+            runbook,
+            prData.repoOwner,
+            prData.repoName
+        );
+
+        console.log("📨 Runbook comment posted on PR");
+
+    } catch (error) {
+        console.error("Error processing GitHub webhook:", error);
+    }
+});
 
 const start = async () => {
     await connectDB();

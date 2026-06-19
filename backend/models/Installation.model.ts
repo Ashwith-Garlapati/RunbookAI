@@ -5,6 +5,7 @@ export interface IInstallation extends Document {
     teamName: string;
     botToken: string;
     botUserId: string;
+    githubOrgs: string[];
     installedAt: Date;
 }
 
@@ -23,6 +24,10 @@ const installationSchema = new Schema<IInstallation>({
     },
     botUserId: {
         type: String,
+    },
+    githubOrgs: {
+        type: [String],
+        default: []
     },
     installedAt: {
         type: Date,

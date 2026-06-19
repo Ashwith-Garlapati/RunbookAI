@@ -14,11 +14,12 @@ export interface IRunbook extends Document {
     incidentStart: string;
     incidentEnd: string;
     approvedBy: string;
+    source?: string;
     createdAt: Date;
 }
 
 const RunbookSchema = new Schema<IRunbook>({
-    teamId: { type: String, required: true },
+    teamId: { type: String },
     channelId: { type: String },
     title: { type: String, required: true },
     severity: { type: String },
@@ -31,6 +32,7 @@ const RunbookSchema = new Schema<IRunbook>({
     incidentStart: { type: String },
     incidentEnd: { type: String },
     approvedBy: { type: String },
+    source: { type: String },
     createdAt: { type: Date, default: Date.now }
 });
 

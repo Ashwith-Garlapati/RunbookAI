@@ -14,6 +14,7 @@
   "type": "module",
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
+    "@octokit/rest": "^22.0.1",
     "@slack/bolt": "^4.7.2",
     "@slack/web-api": "^7.16.0",
     "cors": "^2.8.6",
