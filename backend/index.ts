@@ -174,7 +174,7 @@ bolt.event("message", async ({ event, say }) => {
                 return;
             }
 
-            console.log(`📚 Found ${similarRunbooks.length} similar past incidents — posting to channel`);
+            console.log(`Found ${similarRunbooks.length} similar past incidents — posting to channel`);
 
             const webClient = new WebClient(token);
 
