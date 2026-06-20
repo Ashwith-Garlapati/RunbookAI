@@ -23,6 +23,9 @@ export const verifyGitHubSignature = (
 
 export const extractPRData = (payload: any) => {
     const pr = payload.pull_request;
+    if (!pr) {
+        throw new Error("payload.pull_request is required");
+    }
 
     return {
         title: pr.title || "",

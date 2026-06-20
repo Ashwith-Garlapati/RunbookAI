@@ -9,13 +9,12 @@ const octokit = new Octokit({
     auth: process.env.GITHUB_TOKEN
 });
 
-const OWNER = process.env.GITHUB_OWNER || "";
-const REPO = process.env.GITHUB_REPO || "";
+const OWNER = process.env.GITHUB_OWNER;
+const REPO = process.env.GITHUB_REPO;
 
 if (!process.env.GITHUB_TOKEN || !OWNER || !REPO) {
     throw new Error("Missing required environment variables: GITHUB_TOKEN, GITHUB_OWNER, and GITHUB_REPO must be set");
 }
-
 const toFileName = (title: string): string => {
     const sanitized = title
         .toLowerCase()
@@ -135,7 +134,10 @@ export const publishToGitHub = async (
             ...(existingFileSha ? { sha: existingFileSha } : {})
         });
 
-        const fileUrl = `https://github.com/${repoOwner}/${repoName}/blob/main/${filePath}`;
+        const { data: repoData } = await octokit.repos.get({ owner: repoOwner, repo: repoName });
+        const defaultBranch = repoData.default_branch || "main";
+
+        const fileUrl = `https://github.com/${repoOwner}/${repoName}/blob/${defaultBranch}/${filePath}`;
         console.log(`Published to GitHub: ${fileUrl}`);
         return fileUrl;
 

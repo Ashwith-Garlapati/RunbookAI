@@ -47,7 +47,9 @@ if (!process.env.GITHUB_TOKEN) {
 
 const octokit = new Octokit({
     auth: process.env.GITHUB_TOKEN
-}); const connectDB = async () => {
+});
+
+const connectDB = async () => {
     await mongoose.connect(process.env.MONGODB_URI || "").then(() => {
         console.log("Connected to MongoDB");
     }).catch(async (error) => {
@@ -601,7 +603,9 @@ bolt.command("/runbook", async ({ command, ack, client }) => {
                 return;
             }
 
-            if (installation.githubOrgs.includes(orgName)) {
+            const alreadyLinked = installation.githubOrgs.some((org: string) => org.toLowerCase() === orgName);
+
+            if (alreadyLinked) {
                 await client.chat.postEphemeral({
                     channel: channelId,
                     user: userId,
@@ -724,15 +728,19 @@ app.post("/github/webhook", express.raw({ type: "application/json" }), async (re
             }
 
             const runbook = JSON.parse(match[1] ?? "{}") as GeneratedPRRunbook;
+            if (!runbook.title || !runbook.severity) {
+                console.log("Invalid runbook data extracted");
+                return;
+            }
             console.log(`Extracted runbook: ${runbook.title}`);
 
             if (commentBody === "approve") {
                 console.log(`✅ ${commenter} approved the runbook`);
 
                 // Look up the Slack team linked to this GitHub org
-                const linkedInstallation = await InstallationModel.findOne({
+                const linkedInstallation = repoOwner ? await InstallationModel.findOne({
                     githubOrgs: repoOwner.toLowerCase()
-                });
+                }) : null;
                 const teamId = linkedInstallation?.teamId;
                 if (!teamId) {
                     console.log(`⚠️ No Slack workspace linked to GitHub org "${repoOwner}" — runbook will not be searchable via Slack`);
