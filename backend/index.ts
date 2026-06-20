@@ -560,6 +560,7 @@ bolt.command("/runbook", async ({ command, ack, client }) => {
                 }
             });
 
+            // Send results ephemeral means only the user who typed the command sees it
             await client.chat.postEphemeral({
                 channel: channelId,
                 user: userId,
@@ -665,6 +666,7 @@ bolt.command("/runbook", async ({ command, ack, client }) => {
         ]
     });
 });
+
 
 app.post("/github/webhook", express.raw({ type: "application/json" }), async (req, res) => {
 
@@ -836,6 +838,7 @@ app.post("/github/webhook", express.raw({ type: "application/json" }), async (re
         console.error("Error processing GitHub webhook:", error);
     }
 });
+
 
 const start = async () => {
     await connectDB();
