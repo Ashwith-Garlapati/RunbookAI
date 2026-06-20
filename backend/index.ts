@@ -823,7 +823,6 @@ app.post("/github/webhook", express.raw({ type: "application/json" }), async (re
 
         console.log("Runbook generated from PR:", runbook.title);
 
-        // ✅ CHANGED — post as PR comment instead of Slack DM only
         await postRunbookComment(
             payload.pull_request.number,
             runbook,
