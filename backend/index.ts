@@ -49,6 +49,7 @@ const octokit = new Octokit({
     auth: process.env.GITHUB_TOKEN
 });
 
+//Database connection
 const connectDB = async () => {
     await mongoose.connect(process.env.MONGODB_URI || "").then(() => {
         console.log("Connected to MongoDB");
