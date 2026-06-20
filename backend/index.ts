@@ -134,7 +134,6 @@ const bolt = new App({
 });
 
 bolt.event("message", async ({ event, say }) => {
-    // console.log("RAW EVENT RECEIVED:", JSON.stringify(event));
     if (event.subtype !== undefined) {
         return;
     }
