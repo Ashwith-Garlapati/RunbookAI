@@ -165,7 +165,6 @@ export const postRunbookComment = async (
     const formatList = (items: string[] = []) =>
         items.map((item, i) => `${i + 1}. ${item}`).join("\n") || "Not specified";
 
-    // Embed runbook data as hidden HTML comment
     const hiddenData = `<!--RUNBOOK_DATA:${JSON.stringify(runbook)}-->`;
 
     const commentBody = `## 🤖 RunbookAI — Runbook Draft
