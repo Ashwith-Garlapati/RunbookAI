@@ -816,109 +816,118 @@ bolt.event("message", async ({ event, say }) => {
                 { $push: { messages: `${user}: ${text}` } }
             );
 
-            const similarRunbooks = await findSimilarRunbooks(
-                text,
-                "",
-                teamId
-            );
+            if (!activeSession.similarRunbooksPosted) {
+                const similarRunbooks = await findSimilarRunbooks(
+                    text,
+                    "",
+                    teamId
+                );
 
-            if (similarRunbooks.length === 0) {
-                console.log("No similar past incidents found");
-                return;
+                if (similarRunbooks.length === 0) {
+                    console.log("No similar past incidents found");
+                    await IncidentSessionModel.findByIdAndUpdate(activeSession._id,
+                        { $set: { similarRunbooksPosted: true } }
+                    );
+                    return;
+                }
+
+                console.log(`📚 Found ${similarRunbooks.length} similar past incidents — posting to channel`);
+
+                const webClient = new WebClient(token);
+
+                const similarBlocks: any[] = [
+                    {
+                        type: "section",
+                        text: {
+                            type: "mrkdwn",
+                            text: `🔁 *RunbookAI — Similar past incident${similarRunbooks.length > 1 ? "s" : ""} found*\n\nThis might help resolve the current incident faster:`
+                        }
+                    },
+                    { type: "divider" }
+                ];
+
+                similarRunbooks.forEach((runbook, index) => {
+                    const severityEmoji = {
+                        high: "🔴",
+                        medium: "🟡",
+                        low: "🟢"
+                    }[runbook.severity?.toLowerCase()] || "⚪";
+
+                    const date = runbook.createdAt
+                        ? new Date(runbook.createdAt).toLocaleDateString("en-GB", {
+                            day: "numeric",
+                            month: "short",
+                            year: "numeric"
+                        })
+                            : "Unknown date";
+
+                    similarBlocks.push({
+                        type: "section",
+                        fields: [
+                            {
+                                type: "mrkdwn",
+                                text: `*${index + 1}. ${runbook.title}*`
+                            },
+                            {
+                                type: "mrkdwn",
+                                text: `${severityEmoji} ${runbook.severity?.toUpperCase() || "UNKNOWN"} — ${date}`
+                            }
+                        ]
+                    });
+
+                    similarBlocks.push({
+                        type: "section",
+                        text: {
+                            type: "mrkdwn",
+                            text: `*Root Cause:* ${runbook.rootCause || "Not specified"}`
+                        }
+                    });
+
+                    if (runbook.actionsTaken?.length > 0) {
+                        const actions = runbook.actionsTaken
+                            .map((action: string, i: number) => `${i + 1}. ${action}`)
+                            .join("\n");
+
+                        similarBlocks.push({
+                            type: "section",
+                            text: {
+                                type: "mrkdwn",
+                                text: `*How it was fixed:*\n${actions}`
+                            }
+                        });
+                    }
+
+                    if (runbook.preventionSteps?.length > 0) {
+                        const steps = runbook.preventionSteps
+                            .map((step: string, i: number) => `${i + 1}. ${step}`)
+                            .join("\n");
+
+                        similarBlocks.push({
+                            type: "section",
+                            text: {
+                                type: "mrkdwn",
+                                text: `*Prevention steps:*\n${steps}`
+                            }
+                        });
+                    }
+
+                    if (index < similarRunbooks.length - 1) {
+                        similarBlocks.push({ type: "divider" });
+                    }
+                });
+
+                await webClient.chat.postMessage({
+                    channel,
+                    text: `🔁 RunbookAI found ${similarRunbooks.length} similar past incident(s)`,
+                    blocks: similarBlocks
+                });
+
+                console.log("✅ Similar runbooks posted to channel");
+
+                await IncidentSessionModel.findByIdAndUpdate(activeSession._id,
+                    { $set: { similarRunbooksPosted: true } }
+                );
             }
-
-            console.log(`📚 Found ${similarRunbooks.length} similar past incidents — posting to channel`);
-
-            const webClient = new WebClient(token);
-
-            const similarBlocks: any[] = [
-                {
-                    type: "section",
-                    text: {
-                        type: "mrkdwn",
-                        text: `🔁 *RunbookAI — Similar past incident${similarRunbooks.length > 1 ? "s" : ""} found*\n\nThis might help resolve the current incident faster:`
-                    }
-                },
-                { type: "divider" }
-            ];
-
-            similarRunbooks.forEach((runbook, index) => {
-                const severityEmoji = {
-                    high: "🔴",
-                    medium: "🟡",
-                    low: "🟢"
-                }[runbook.severity?.toLowerCase()] || "⚪";
-
-                const date = runbook.createdAt
-                    ? new Date(runbook.createdAt).toLocaleDateString("en-GB", {
-                        day: "numeric",
-                        month: "short",
-                        year: "numeric"
-                    })
-                        : "Unknown date";
-
-                similarBlocks.push({
-                    type: "section",
-                    fields: [
-                        {
-                            type: "mrkdwn",
-                            text: `*${index + 1}. ${runbook.title}*`
-                        },
-                        {
-                            type: "mrkdwn",
-                            text: `${severityEmoji} ${runbook.severity?.toUpperCase() || "UNKNOWN"} — ${date}`
-                        }
-                    ]
-                });
-
-                similarBlocks.push({
-                    type: "section",
-                    text: {
-                        type: "mrkdwn",
-                        text: `*Root Cause:* ${runbook.rootCause || "Not specified"}`
-                    }
-                });
-
-                if (runbook.actionsTaken?.length > 0) {
-                    const actions = runbook.actionsTaken
-                        .map((action: string, i: number) => `${i + 1}. ${action}`)
-                        .join("\n");
-
-                    similarBlocks.push({
-                        type: "section",
-                        text: {
-                            type: "mrkdwn",
-                            text: `*How it was fixed:*\n${actions}`
-                        }
-                    });
-                }
-
-                if (runbook.preventionSteps?.length > 0) {
-                    const steps = runbook.preventionSteps
-                        .map((step: string, i: number) => `${i + 1}. ${step}`)
-                        .join("\n");
-
-                    similarBlocks.push({
-                        type: "section",
-                        text: {
-                            type: "mrkdwn",
-                            text: `*Prevention steps:*\n${steps}`
-                        }
-                    });
-                }
-
-                if (index < similarRunbooks.length - 1) {
-                    similarBlocks.push({ type: "divider" });
-                }
-            });
-
-            await webClient.chat.postMessage({
-                channel,
-                text: `🔁 RunbookAI found ${similarRunbooks.length} similar past incident(s)`,
-                blocks: similarBlocks
-            });
-
-            console.log("✅ Similar runbooks posted to channel");
         }
 
         } catch (error) {

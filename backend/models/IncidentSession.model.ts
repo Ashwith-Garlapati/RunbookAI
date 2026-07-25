@@ -13,6 +13,7 @@ export interface IIncidentSession extends Document {
     resolvedBy?: string;
     resolvedAt?: Date;
     messages: string[];
+    similarRunbooksPosted?: boolean;
 }
 
 const IncidentSessionSchema = new Schema<IIncidentSession>({
@@ -31,7 +32,8 @@ const IncidentSessionSchema = new Schema<IIncidentSession>({
     startedAt: { type: Date, default: Date.now },
     resolvedBy: { type: String },
     resolvedAt: { type: Date },
-    messages: [{ type: String }]
+    messages: [{ type: String }],
+    similarRunbooksPosted: { type: Boolean, default: false }
 });
 
 // Only one active session per channel per team
