@@ -8,7 +8,6 @@ import { Octokit } from "@octokit/rest";
 
 import InstallationModel from "./models/Installation.model.js";
 import { generateRunbook, type GeneratedPRRunbook } from "./services/aiEngine.js";
-import { detectionIncident } from "./services/aiEngine.js";
 import { readFullThread } from "./services/slackReader.js";
 import { RunbookModel } from "./models/Runbook.model.js";
 import { searchRunbooks, findSimilarRunbooks } from "./services/runbookSearch.js";
@@ -24,6 +23,9 @@ import {
     postStatusComment
 } from "./services/githubPublisher.js";
 import { generateRunbookFromPR } from "./services/aiEngine.js";
+import { IncidentSessionModel } from "./models/IncidentSession.model.js";
+import { createIncidentChannel } from "./services/slackChannelManager.js";
+import { buildIncidentModal } from "./services/slackModal.js";
 
 dotenv.config();
 
@@ -637,6 +639,85 @@ bolt.command("/runbook", async ({ command, ack, client }) => {
         return;
     }
 
+    if(subcommand === "start") {
+        const activeSession = await IncidentSessionModel.findOne({
+            channelId: channelId,
+            teamId,
+            status: "active"
+        });
+
+        if(activeSession) {
+            await client.chat.postEphemeral({
+                channel: channelId,
+                user: userId,
+                text: "⚠️ An incident is already being tracked",
+                blocks: [
+                    {
+                        type: "section",
+                        text: {
+                            type: "mrkdwn",
+                            text: `⚠️ *An incident is already being tracked in this channel* since ${new Date(activeSession.startedAt).toLocaleTimeString()}.\n\nIs this the same incident or a new one?`
+                        }
+                    },
+                    {
+                        type: "actions",
+                        elements: [
+                            {
+                                type: "button",
+                                text: { type: "plain_text", text: "Same incident — keep tracking" },
+                                action_id: "same_incident",
+                                value: "same"
+                            },
+                            {
+                                type: "button",
+                                text: { type: "plain_text", text: "New incident — create new channel" },
+                                style: "primary",
+                                action_id: "new_incident_new_channel",
+                                value: JSON.stringify({ channelId, teamId, triggeredBy: userId })
+                            }
+                        ]
+                    }
+                ]
+            });
+            return;
+        }
+
+        await client.views.open({
+            trigger_id: command.trigger_id,
+            view: buildIncidentModal(channelId, userId) as any
+        });
+
+        return;
+    }
+
+    if(subcommand === "resolve") {
+        const activeSession = await IncidentSessionModel.findOne({
+            channelId,
+            teamId,
+            status: "active"
+        });
+
+        if(!activeSession) {
+            await client.chat.postEphemeral({
+                channel: channelId,
+                user: userId,
+                text: "⚠️ No active incident session found in this channel. Use `/runbook start` to begin tracking first."
+            });
+            return;
+        }
+
+        await IncidentSessionModel.findByIdAndUpdate(
+            activeSession._id,
+            {
+                status: "resolved",
+                resolvedBy: userId,
+                resolvedAt: new Date()
+            }
+        );
+
+        
+    }
+
     await client.chat.postEphemeral({
         channel: channelId,
         user: userId,
@@ -667,6 +748,475 @@ bolt.command("/runbook", async ({ command, ack, client }) => {
     });
 });
 
+bolt.event("message", async ({ event, say }) => {
+    // console.log("RAW EVENT RECEIVED:", JSON.stringify(event));
+    if (event.subtype !== undefined) {
+        return;
+    }
+
+    const text = event.text ?? "";
+    const user = event.user;
+    const channel = event.channel;
+
+    if (!text || text.length < 5) return;
+    if (!user || user === "") return;
+
+    try {
+        const teamId = event.team;
+        if (!teamId) return;
+        const installation = await InstallationModel.findOne({ teamId });
+        if (!installation) return;
+
+        const token = installation.botToken;
+
+        const activeSession = await IncidentSessionModel.findOne({
+            channelId: channel,
+            teamId,
+            status: "active"
+        });
+
+        if(activeSession) {
+            await IncidentSessionModel.findByIdAndUpdate(activeSession._id,
+                { $push: { messages: `${user}: ${text}` } }
+            )
+        }
+
+        
+
+        const similarRunbooks = await findSimilarRunbooks(
+            text,
+            "",
+            teamId
+        );
+
+        if (similarRunbooks.length === 0) {
+            console.log("No similar past incidents found");
+            return;
+        }
+
+        console.log(`📚 Found ${similarRunbooks.length} similar past incidents — posting to channel`);
+
+        const webClient = new WebClient(token);
+
+        const similarBlocks: any[] = [
+            {
+                type: "section",
+                text: {
+                    type: "mrkdwn",
+                    text: `🔁 *RunbookAI — Similar past incident${similarRunbooks.length > 1 ? "s" : ""} found*\n\nThis might help resolve the current incident faster:`
+                }
+            },
+            { type: "divider" }
+        ];
+
+        similarRunbooks.forEach((runbook, index) => {
+            const severityEmoji = {
+                high: "🔴",
+                medium: "🟡",
+                low: "🟢"
+            }[runbook.severity?.toLowerCase()] || "⚪";
+
+            const date = runbook.createdAt
+                ? new Date(runbook.createdAt).toLocaleDateString("en-GB", {
+                    day: "numeric",
+                    month: "short",
+                    year: "numeric"
+                })
+                    : "Unknown date";
+
+            similarBlocks.push({
+                type: "section",
+                fields: [
+                    {
+                        type: "mrkdwn",
+                        text: `*${index + 1}. ${runbook.title}*`
+                    },
+                    {
+                        type: "mrkdwn",
+                        text: `${severityEmoji} ${runbook.severity?.toUpperCase()} — ${date}`
+                    }
+                ]
+            });
+
+            similarBlocks.push({
+                type: "section",
+                text: {
+                    type: "mrkdwn",
+                    text: `*Root Cause:* ${runbook.rootCause || "Not specified"}`
+                }
+            });
+
+            if (runbook.actionsTaken?.length > 0) {
+                const actions = runbook.actionsTaken
+                    .map((action: string, i: number) => `${i + 1}. ${action}`)
+                    .join("\n");
+
+                similarBlocks.push({
+                    type: "section",
+                    text: {
+                        type: "mrkdwn",
+                        text: `*How it was fixed:*\n${actions}`
+                    }
+                });
+            }
+
+            if (runbook.preventionSteps?.length > 0) {
+                const steps = runbook.preventionSteps
+                    .map((step: string, i: number) => `${i + 1}. ${step}`)
+                    .join("\n");
+
+                similarBlocks.push({
+                    type: "section",
+                    text: {
+                        type: "mrkdwn",
+                        text: `*Prevention steps:*\n${steps}`
+                    }
+                });
+            }
+
+            if (index < similarRunbooks.length - 1) {
+                similarBlocks.push({ type: "divider" });
+            }
+        });
+
+        await webClient.chat.postMessage({
+            channel,
+            text: `🔁 RunbookAI found ${similarRunbooks.length} similar past incident(s)`,
+            blocks: similarBlocks
+        });
+
+            console.log("✅ Similar runbooks posted to channel");
+
+        } catch (error) {
+            console.error("Error finding similar runbooks:", error);
+        }
+
+        // return;
+
+    try {
+        const teamId = event.team;
+        if (!teamId) {
+            console.log("No teamId found in event");
+            return;
+        }
+
+        const installation = await InstallationModel.findOne({ teamId });
+        if (!installation) {
+            console.log("No installation found for team", teamId);
+            return;
+        }
+        const botToken = installation.botToken;
+
+        console.log("📖 Reading full Slack thread...");
+        const messages = await readFullThread(botToken, channel);
+
+        if (messages.length === 0) {
+            console.log("No messages found");
+            return;
+        }
+
+        console.log("🤖 Sending to Gemini AI...");
+        const runbook = await generateRunbook(messages, channel);
+
+        if (!runbook) {
+            console.log("Failed to generate runbook");
+            return;
+        }
+
+        console.log("✅ Runbook generated:", runbook);
+
+        let approvalTarget = user;
+
+        if (runbook.owner) {
+            const ownerFromThread = messages.find((msg: string) =>
+                msg.toLowerCase().includes(runbook.owner.toLowerCase())
+            );
+
+            if (ownerFromThread) {
+                const ownerId = ownerFromThread.split(":")[0]?.trim();
+                if (ownerId && ownerId.startsWith("U")) {
+                    approvalTarget = ownerId;
+                    console.log(`📨 Sending to Gemini-identified owner: ${ownerId}`);
+                }
+            }
+        }
+
+        if (approvalTarget === user) {
+            const messageCounts = new Map<string, number>();
+            messages.forEach(msg => {
+                const userId = msg.split(":")[0]?.trim();
+                if (userId?.startsWith("U")) {
+                    messageCounts.set(userId, (messageCounts.get(userId) || 0) + 1);
+                }
+            });
+
+            let maxCount = 0;
+            messageCounts.forEach((count, userId) => {
+                if (count > maxCount) {
+                    maxCount = count;
+                    approvalTarget = userId;
+                }
+            });
+        }
+
+        const client = new WebClient(botToken as string);
+
+        await client.chat.postMessage({
+            channel: approvalTarget,
+            text: 'RunbookAI — Runbook Draft Ready',
+            blocks: [
+                {
+                    type: "section",
+                    text: {
+                        type: "mrkdwn",
+                        text: `🤖 *RunbookAI detected an incident resolution*\n\nHere is your generated runbook:`
+                    }
+                },
+                {
+                    type: "section",
+                    fields: [
+                        {
+                            type: "mrkdwn",
+                            text: `*Title:*\n${runbook.title}`
+                        },
+                        {
+                            type: "mrkdwn",
+                            text: `*Severity:*\n${runbook.severity}`
+                        },
+                        {
+                            type: "mrkdwn",
+                            text: `*Root Cause:*\n${runbook.rootCause}`
+                        },
+                        {
+                            type: "mrkdwn",
+                            text: `*Overview:*\n${runbook.overview}`
+                        }
+                    ]
+                },
+                {
+                    type: "actions",
+                    elements: [
+                        {
+                            type: "button",
+                            text: { type: "plain_text", text: "✅ Approve" },
+                            style: "primary",
+                            action_id: "approve_runbook",
+                            value: JSON.stringify(runbook)
+                        },
+                        {
+                            type: "button",
+                            text: { type: "plain_text", text: "❌ Reject" },
+                            style: "danger",
+                            action_id: "reject_runbook"
+                        }
+                    ]
+                }
+            ]
+        });
+
+        console.log(`📨 Approval DM sent to engineer ${user}`);
+
+    } catch (error) {
+        console.log("Error generating runbook:", error);
+    }
+});
+
+bolt.action("approve_runbook", async ({ ack, body, client }) => {
+    await ack();
+
+    const runbook = JSON.parse((body as any).actions[0].value);
+    const approvedBy = body.user.id;
+    const teamId = (body as any).team?.id;
+
+    console.log("✅ Engineer approved runbook:", runbook.title);
+
+    await RunbookModel.create({
+        teamId,
+        title: runbook.title,
+        severity: runbook.severity,
+        overview: runbook.overview,
+        rootCause: runbook.rootCause,
+        actionsTaken: runbook.actionsTaken,
+        preventionSteps: runbook.preventionSteps,
+        keyEvents: runbook.keyEvents,
+        owner: runbook.owner,
+        incidentStart: runbook.incidentStart,
+        incidentEnd: runbook.incidentEnd,
+        approvedBy: approvedBy,
+    });
+
+    console.log("💾 Runbook saved to MongoDB");
+
+    await client.chat.postMessage({
+        channel: body.user.id,
+        text: `✅ Runbook *"${runbook.title}"* approved and saved successfully.`
+    });
+});
+
+bolt.action("reject_runbook", async ({ ack, body, client }) => {
+    await ack();
+
+    console.log("Engineer rejected the runbook");
+
+    await client.chat.postMessage({
+        channel: body.user.id,
+        text: `Runbook rejected and discarded.`
+    });
+});
+
+bolt.view("incident_modal_submit", async ({ ack, view, body, client }) => {
+    await ack(); // acknowledge immediately
+
+    // Extract submitted values
+    const values = view.state.values;
+    const metadata = JSON.parse(view.private_metadata);
+
+    const { channelId, triggeredBy } = metadata;
+    const userId = body.user.id;
+    const teamId = body.user.team_id;
+    if (!teamId) {
+        console.log("Can't fetch the teamId from slack");
+        return;
+    }
+
+    const title = values.incident_title?.title_input?.value || "Untitled Incident";
+    const severity = values.incident_severity?.severity_input?.selected_option?.value || "unknown";
+    const description = values.incident_description?.description_input?.value || "";
+    const affectedService = values.affected_service?.service_input?.value || "";
+    const incidentType = values.incident_type?.type_input?.selected_option?.value || "unknown";
+
+    console.log(`📋 Modal submitted — Title: ${title}, Severity: ${severity}`);
+
+    try {
+        const installation = await InstallationModel.findOne({ teamId });
+        if (!installation) return;
+
+        const token = installation.botToken;
+        const webClient = new WebClient(token);
+
+        // Scan last 15 minutes of messages from the channel
+        const cutoffTime = Date.now() / 1000 - 15 * 60;
+        const history = await webClient.conversations.history({
+            channel: channelId,
+            oldest: cutoffTime.toString(),
+            limit: 50
+        });
+
+        const recentMessages = (history.messages || [])
+            .reverse()
+            .filter(msg => msg.text && msg.text.length > 0)
+            .map(msg => `${msg.user || "unknown"}: ${msg.text}`);
+
+        // Add the engineer's description as the first message
+        // so it is captured in the runbook context
+        const initialContext = `${userId}: [Incident started] ${description}`;
+        const allMessages = [initialContext, ...recentMessages];
+
+        await IncidentSessionModel.create({
+            channelId,
+            teamId,
+            sessionName: title,
+            status: "active",
+            triggeredBy,
+            severity,
+            affectedService,
+            incidentType,
+            messages: allMessages
+        });
+
+        // Post public notice in the channel
+        const severityEmoji = {
+            high: "🔴",
+            medium: "🟡",
+            low: "🟢"
+        }[severity] || "⚪";
+
+        await webClient.chat.postMessage({
+            channel: channelId,
+            text: `🚨 Incident tracking started`,
+            blocks: [
+                {
+                    type: "section",
+                    text: {
+                        type: "mrkdwn",
+                        text: `🚨 *Incident tracking started by <@${userId}>*`
+                    }
+                },
+                {
+                    type: "section",
+                    fields: [
+                        {
+                            type: "mrkdwn",
+                            text: `*Title:*\n${title}`
+                        },
+                        {
+                            type: "mrkdwn",
+                            text: `*Severity:*\n${severityEmoji} ${severity.toUpperCase()}`
+                        },
+                        {
+                            type: "mrkdwn",
+                            text: `*Type:*\n${incidentType}`
+                        },
+                        {
+                            type: "mrkdwn",
+                            text: `*Service:*\n${affectedService || "Not specified"}`
+                        }
+                    ]
+                },
+                {
+                    type: "section",
+                    text: {
+                        type: "mrkdwn",
+                        text: `*What is happening:*\n${description}`
+                    }
+                },
+                {
+                    type: "context",
+                    elements: [
+                        {
+                            type: "mrkdwn",
+                            text: `All messages in this channel are now being collected. Type \`/runbook resolve\` when the incident is fixed.`
+                        }
+                    ]
+                }
+            ]
+        });
+
+        // Search for similar past incidents
+        const similarRunbooks = await findSimilarRunbooks(
+            `${title} ${description}`,
+            incidentType,
+            teamId,
+            1
+        );
+
+        const firstRunbook = similarRunbooks[0];
+        if (firstRunbook) {
+            await webClient.chat.postMessage({
+                channel: channelId,
+                text: `💡 Similar past incident found`,
+                blocks: [
+                    {
+                        type: "section",
+                        text: {
+                            type: "mrkdwn",
+                            text: `💡 *Similar past incident found:*\n\n*${firstRunbook.title}*\nRoot cause: ${firstRunbook.rootCause || "Not specified"}\n\nHow it was fixed:\n${firstRunbook.actionsTaken?.map((a: string, i: number) => `${i + 1}. ${a}`).join("\n") || "Not specified"}`
+                        }
+                    }
+                ]
+            });
+        }
+
+        console.log(`✅ Incident session created: ${title}`);
+
+    } catch (error: any) {
+        if (error.code === 11000) {
+            console.log("Duplicate session — already active");
+        } else {
+            console.error("Error creating session:", error);
+        }
+    }
+});
 
 app.post("/github/webhook", express.raw({ type: "application/json" }), async (req, res) => {
 

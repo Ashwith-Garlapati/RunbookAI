@@ -1,6 +1,6 @@
 import { WebClient } from "@slack/web-api";
 
-const readFullThread = async (token: String, channelId: String) => {
+const readFullThread = async (token: string, channelId: string) => {
     const client = new WebClient(token as string);
 
     const result = await client.conversations.history({
