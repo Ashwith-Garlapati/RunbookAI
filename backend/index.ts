@@ -68,10 +68,12 @@ const bolt = new App({
     stateSecret: 'runbookai-state-secret',
     scopes: [
         'channels:history',
+        'channels:manage',
         'groups:history',
         'chat:write',
         'im:write',
-        'users:read'
+        'users:read',
+        'commands'
     ],
 
     installationStore: {
@@ -640,52 +642,61 @@ bolt.command("/runbook", async ({ command, ack, client }) => {
     }
 
     if(subcommand === "start") {
-        const activeSession = await IncidentSessionModel.findOne({
-            channelId: channelId,
-            teamId,
-            status: "active"
-        });
+        try {
+            const activeSession = await IncidentSessionModel.findOne({
+                channelId: channelId,
+                teamId,
+                status: "active"
+            });
 
-        if(activeSession) {
+            if(activeSession) {
+                await client.chat.postEphemeral({
+                    channel: channelId,
+                    user: userId,
+                    text: "⚠️ An incident is already being tracked",
+                    blocks: [
+                        {
+                            type: "section",
+                            text: {
+                                type: "mrkdwn",
+                                text: `⚠️ *An incident is already being tracked in this channel* since ${new Date(activeSession.startedAt).toLocaleTimeString()}.\n\nIs this the same incident or a new one?`
+                            }
+                        },
+                        {
+                            type: "actions",
+                            elements: [
+                                {
+                                    type: "button",
+                                    text: { type: "plain_text", text: "Same incident — keep tracking" },
+                                    action_id: "same_incident",
+                                    value: "same"
+                                },
+                                {
+                                    type: "button",
+                                    text: { type: "plain_text", text: "New incident — create new channel" },
+                                    style: "primary",
+                                    action_id: "new_incident_new_channel",
+                                    value: JSON.stringify({ channelId, teamId, triggeredBy: userId })
+                                }
+                            ]
+                        }
+                    ]
+                });
+                return;
+            }
+
+            await client.views.open({
+                trigger_id: command.trigger_id,
+                view: buildIncidentModal(channelId, userId) as any
+            });
+        } catch (error) {
+            console.error("Start incident error:", error);
             await client.chat.postEphemeral({
                 channel: channelId,
                 user: userId,
-                text: "⚠️ An incident is already being tracked",
-                blocks: [
-                    {
-                        type: "section",
-                        text: {
-                            type: "mrkdwn",
-                            text: `⚠️ *An incident is already being tracked in this channel* since ${new Date(activeSession.startedAt).toLocaleTimeString()}.\n\nIs this the same incident or a new one?`
-                        }
-                    },
-                    {
-                        type: "actions",
-                        elements: [
-                            {
-                                type: "button",
-                                text: { type: "plain_text", text: "Same incident — keep tracking" },
-                                action_id: "same_incident",
-                                value: "same"
-                            },
-                            {
-                                type: "button",
-                                text: { type: "plain_text", text: "New incident — create new channel" },
-                                style: "primary",
-                                action_id: "new_incident_new_channel",
-                                value: JSON.stringify({ channelId, teamId, triggeredBy: userId })
-                            }
-                        ]
-                    }
-                ]
+                text: "❌ Failed to start incident tracking. Please try again."
             });
-            return;
         }
-
-        await client.views.open({
-            trigger_id: command.trigger_id,
-            view: buildIncidentModal(channelId, userId) as any
-        });
 
         return;
     }
@@ -715,7 +726,13 @@ bolt.command("/runbook", async ({ command, ack, client }) => {
             }
         );
 
-        
+        await client.chat.postEphemeral({
+            channel: channelId,
+            user: userId,
+            text: "✅ Incident has been marked as resolved. Thank you!"
+        });
+
+        return;
     }
 
     await client.chat.postEphemeral({
@@ -741,6 +758,20 @@ bolt.command("/runbook", async ({ command, ack, client }) => {
                 type: "section",
                 text: {
                     type: "mrkdwn",
+                    text: "`/runbook start` — Start tracking a new incident in this channel\n*Example:* `/runbook start`"
+                }
+            },
+            {
+                type: "section",
+                text: {
+                    type: "mrkdwn",
+                    text: "`/runbook resolve` — Mark the active incident as resolved\n*Example:* `/runbook resolve`"
+                }
+            },
+            {
+                type: "section",
+                text: {
+                    type: "mrkdwn",
                     text: "`/runbook github-link [org]` — Link a GitHub org to this workspace\n*Example:* `/runbook github-link my-org`"
                 }
             }
@@ -751,6 +782,11 @@ bolt.command("/runbook", async ({ command, ack, client }) => {
 bolt.event("message", async ({ event, say }) => {
     // console.log("RAW EVENT RECEIVED:", JSON.stringify(event));
     if (event.subtype !== undefined) {
+        return;
+    }
+
+    // Skip bot / self messages to avoid feedback loops
+    if ((event as any).bot_id || (event as any).bot_profile || (event as any).app_id) {
         return;
     }
 
@@ -775,117 +811,115 @@ bolt.event("message", async ({ event, say }) => {
             status: "active"
         });
 
-        if(activeSession) {
+        if (activeSession) {
             await IncidentSessionModel.findByIdAndUpdate(activeSession._id,
                 { $push: { messages: `${user}: ${text}` } }
-            )
-        }
+            );
 
-        
+            const similarRunbooks = await findSimilarRunbooks(
+                text,
+                "",
+                teamId
+            );
 
-        const similarRunbooks = await findSimilarRunbooks(
-            text,
-            "",
-            teamId
-        );
+            if (similarRunbooks.length === 0) {
+                console.log("No similar past incidents found");
+                return;
+            }
 
-        if (similarRunbooks.length === 0) {
-            console.log("No similar past incidents found");
-            return;
-        }
+            console.log(`📚 Found ${similarRunbooks.length} similar past incidents — posting to channel`);
 
-        console.log(`📚 Found ${similarRunbooks.length} similar past incidents — posting to channel`);
+            const webClient = new WebClient(token);
 
-        const webClient = new WebClient(token);
-
-        const similarBlocks: any[] = [
-            {
-                type: "section",
-                text: {
-                    type: "mrkdwn",
-                    text: `🔁 *RunbookAI — Similar past incident${similarRunbooks.length > 1 ? "s" : ""} found*\n\nThis might help resolve the current incident faster:`
-                }
-            },
-            { type: "divider" }
-        ];
-
-        similarRunbooks.forEach((runbook, index) => {
-            const severityEmoji = {
-                high: "🔴",
-                medium: "🟡",
-                low: "🟢"
-            }[runbook.severity?.toLowerCase()] || "⚪";
-
-            const date = runbook.createdAt
-                ? new Date(runbook.createdAt).toLocaleDateString("en-GB", {
-                    day: "numeric",
-                    month: "short",
-                    year: "numeric"
-                })
-                    : "Unknown date";
-
-            similarBlocks.push({
-                type: "section",
-                fields: [
-                    {
+            const similarBlocks: any[] = [
+                {
+                    type: "section",
+                    text: {
                         type: "mrkdwn",
-                        text: `*${index + 1}. ${runbook.title}*`
-                    },
-                    {
-                        type: "mrkdwn",
-                        text: `${severityEmoji} ${runbook.severity?.toUpperCase()} — ${date}`
+                        text: `🔁 *RunbookAI — Similar past incident${similarRunbooks.length > 1 ? "s" : ""} found*\n\nThis might help resolve the current incident faster:`
                     }
-                ]
-            });
+                },
+                { type: "divider" }
+            ];
 
-            similarBlocks.push({
-                type: "section",
-                text: {
-                    type: "mrkdwn",
-                    text: `*Root Cause:* ${runbook.rootCause || "Not specified"}`
-                }
-            });
+            similarRunbooks.forEach((runbook, index) => {
+                const severityEmoji = {
+                    high: "🔴",
+                    medium: "🟡",
+                    low: "🟢"
+                }[runbook.severity?.toLowerCase()] || "⚪";
 
-            if (runbook.actionsTaken?.length > 0) {
-                const actions = runbook.actionsTaken
-                    .map((action: string, i: number) => `${i + 1}. ${action}`)
-                    .join("\n");
+                const date = runbook.createdAt
+                    ? new Date(runbook.createdAt).toLocaleDateString("en-GB", {
+                        day: "numeric",
+                        month: "short",
+                        year: "numeric"
+                    })
+                        : "Unknown date";
+
+                similarBlocks.push({
+                    type: "section",
+                    fields: [
+                        {
+                            type: "mrkdwn",
+                            text: `*${index + 1}. ${runbook.title}*`
+                        },
+                        {
+                            type: "mrkdwn",
+                            text: `${severityEmoji} ${runbook.severity?.toUpperCase() || "UNKNOWN"} — ${date}`
+                        }
+                    ]
+                });
 
                 similarBlocks.push({
                     type: "section",
                     text: {
                         type: "mrkdwn",
-                        text: `*How it was fixed:*\n${actions}`
+                        text: `*Root Cause:* ${runbook.rootCause || "Not specified"}`
                     }
                 });
-            }
 
-            if (runbook.preventionSteps?.length > 0) {
-                const steps = runbook.preventionSteps
-                    .map((step: string, i: number) => `${i + 1}. ${step}`)
-                    .join("\n");
+                if (runbook.actionsTaken?.length > 0) {
+                    const actions = runbook.actionsTaken
+                        .map((action: string, i: number) => `${i + 1}. ${action}`)
+                        .join("\n");
 
-                similarBlocks.push({
-                    type: "section",
-                    text: {
-                        type: "mrkdwn",
-                        text: `*Prevention steps:*\n${steps}`
-                    }
-                });
-            }
+                    similarBlocks.push({
+                        type: "section",
+                        text: {
+                            type: "mrkdwn",
+                            text: `*How it was fixed:*\n${actions}`
+                        }
+                    });
+                }
 
-            if (index < similarRunbooks.length - 1) {
-                similarBlocks.push({ type: "divider" });
-            }
-        });
+                if (runbook.preventionSteps?.length > 0) {
+                    const steps = runbook.preventionSteps
+                        .map((step: string, i: number) => `${i + 1}. ${step}`)
+                        .join("\n");
 
-        await webClient.chat.postMessage({
-            channel,
-            text: `🔁 RunbookAI found ${similarRunbooks.length} similar past incident(s)`,
-            blocks: similarBlocks
-        });
+                    similarBlocks.push({
+                        type: "section",
+                        text: {
+                            type: "mrkdwn",
+                            text: `*Prevention steps:*\n${steps}`
+                        }
+                    });
+                }
+
+                if (index < similarRunbooks.length - 1) {
+                    similarBlocks.push({ type: "divider" });
+                }
+            });
+
+            await webClient.chat.postMessage({
+                channel,
+                text: `🔁 RunbookAI found ${similarRunbooks.length} similar past incident(s)`,
+                blocks: similarBlocks
+            });
 
             console.log("✅ Similar runbooks posted to channel");
+        }
 
         } catch (error) {
             console.error("Error finding similar runbooks:", error);
@@ -1064,16 +1098,66 @@ bolt.action("reject_runbook", async ({ ack, body, client }) => {
     });
 });
 
+bolt.action("same_incident", async ({ ack, body, client }) => {
+    await ack();
+
+    console.log("Engineer confirmed same incident — continuing tracking");
+
+    await client.chat.postMessage({
+        channel: (body as any).channel?.id || body.user.id,
+        text: `✅ Continuing to track the active incident. All messages are being collected.`
+    });
+});
+
+bolt.action("new_incident_new_channel", async ({ ack, body, client }) => {
+    await ack();
+
+    const action = (body as any).actions?.[0];
+    let channelId: string;
+    let triggeredBy: string;
+
+    try {
+        const parsed = JSON.parse(action?.value || "{}");
+        channelId = parsed.channelId;
+        triggeredBy = parsed.triggeredBy || body.user.id;
+    } catch (error) {
+        console.error("Failed to parse new_incident_new_channel value:", error);
+        await client.chat.postMessage({
+            channel: body.user.id,
+            text: "❌ Something went wrong. Please try `/runbook start` again."
+        });
+        return;
+    }
+
+    console.log("Engineer chose new incident — opening incident modal");
+
+    await client.views.open({
+        trigger_id: (body as any).trigger_id,
+        view: buildIncidentModal(channelId, triggeredBy) as any
+    });
+});
+
 bolt.view("incident_modal_submit", async ({ ack, view, body, client }) => {
     await ack(); // acknowledge immediately
 
     // Extract submitted values
     const values = view.state.values;
-    const metadata = JSON.parse(view.private_metadata);
+
+    let metadata: Record<string, any>;
+    try {
+        metadata = JSON.parse(view.private_metadata || "{}");
+    } catch {
+        console.error("Failed to parse incident modal private_metadata:", view.private_metadata);
+        await client.chat.postMessage({
+            channel: body.user.id,
+            text: "⚠️ Something went wrong submitting the incident form. Please try again.",
+        });
+        return;
+    }
 
     const { channelId, triggeredBy } = metadata;
     const userId = body.user.id;
-    const teamId = body.user.team_id;
+    const teamId = (body as Record<string, any>).team?.id || view.team_id;
     if (!teamId) {
         console.log("Can't fetch the teamId from slack");
         return;
@@ -1212,8 +1296,16 @@ bolt.view("incident_modal_submit", async ({ ack, view, body, client }) => {
     } catch (error: any) {
         if (error.code === 11000) {
             console.log("Duplicate session — already active");
+            await client.chat.postMessage({
+                channel: body.user.id,
+                text: "⚠️ An active incident session already exists in this channel. Incident tracking was not started.",
+            });
         } else {
             console.error("Error creating session:", error);
+            await client.chat.postMessage({
+                channel: body.user.id,
+                text: "❌ Failed to start incident tracking. Please try again.",
+            });
         }
     }
 });

@@ -43,12 +43,33 @@ export const createIncidentChannel = async (
             const timestamp = Date.now().toString().slice(-4);
             const uniqueName = `${channelName}-${timestamp}`;
 
-            const retryResult = await client.conversations.create({
-                name: uniqueName,
-                is_private: false
-            });
+            try {
+                const retryResult = await client.conversations.create({
+                    name: uniqueName,
+                    is_private: false
+                });
 
-            return retryResult.channel?.id || null;
+                const retryChannelId = retryResult.channel?.id;
+                if (!retryChannelId) {
+                    console.error("Failed to get channel ID after retry creation");
+                    return null;
+                }
+
+                await client.conversations.invite({
+                    channel: retryChannelId,
+                    users: inviteUserId
+                });
+                await client.chat.postMessage({
+                    channel: retryChannelId,
+                    text: `🚨 *Incident channel created by RunbookAI*\n\nThis channel is dedicated to tracking the current incident.\n\nType \`/runbook resolve\` when the incident is fixed to generate a runbook.`
+                });
+
+                console.log(`✅ Created incident channel: #${uniqueName}`);
+                return retryChannelId;
+            } catch (retryError) {
+                console.error("Error creating channel on retry:", retryError);
+                return null;
+            }
         }
 
         console.error("Error creating channel:", error);

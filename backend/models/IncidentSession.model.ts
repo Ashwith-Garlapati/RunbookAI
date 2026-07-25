@@ -6,9 +6,9 @@ export interface IIncidentSession extends Document {
     sessionName: string;
     status: "active" | "resolved";
     triggeredBy: string;
-    severity: string,
-    affectedService: string,
-    incidentType: string,
+    severity?: string,
+    affectedService?: string,
+    incidentType?: string,
     startedAt: Date;
     resolvedBy?: string;
     resolvedAt?: Date;
