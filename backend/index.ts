@@ -27,6 +27,18 @@ import { IncidentSessionModel } from "./models/IncidentSession.model.js";
 import { createIncidentChannel } from "./services/slackChannelManager.js";
 import { buildIncidentModal } from "./services/slackModal.js";
 
+import { MongoInvestigationRepository } from "./infrastructure/MongoInvestigationRepository.js";
+import { MongoTimelineRepository } from "./infrastructure/MongoTimelineRepository.js";
+import { MongoFindingRepository } from "./infrastructure/MongoFindingRepository.js";
+import { MongoReportRepository } from "./infrastructure/MongoReportRepository.js";
+import { MongoRunbookReferenceRepository } from "./infrastructure/MongoRunbookReferenceRepository.js";
+import { InProcessEventBus } from "./infrastructure/InProcessEventBus.js";
+import { InvestigationService } from "./domains/investigation/InvestigationService.js";
+import { TimelineService } from "./domains/investigation/TimelineService.js";
+import { AuditEventHandler } from "./handlers/AuditEventHandler.js";
+import { TimelineHandler } from "./handlers/TimelineHandler.js";
+import { LoggingHandler } from "./handlers/LoggingHandler.js";
+
 dotenv.config();
 
 const app = express();
@@ -1176,8 +1188,40 @@ app.post("/github/webhook", express.raw({ type: "application/json" }), async (re
 });
 
 
+let investigationService: InvestigationService;
+let timelineHandler: TimelineHandler;
+
 const start = async () => {
     await connectDB();
+
+    const investigationRepo = new MongoInvestigationRepository();
+    const timelineRepo = new MongoTimelineRepository();
+    const findingRepo = new MongoFindingRepository();
+    const reportRepo = new MongoReportRepository();
+    const runbookRefRepo = new MongoRunbookReferenceRepository();
+    const eventBus = new InProcessEventBus();
+    const timelineService = new TimelineService(timelineRepo);
+
+    // Wire up event handlers
+    const auditHandler = new AuditEventHandler();
+    const loggingHandler = new LoggingHandler();
+    timelineHandler = new TimelineHandler(timelineService);
+
+    eventBus.subscribe("*", auditHandler);
+    eventBus.subscribe("*", loggingHandler);
+    eventBus.subscribe("*", timelineHandler);
+
+    investigationService = new InvestigationService(
+        investigationRepo,
+        eventBus,
+        timelineService,
+        findingRepo,
+        reportRepo,
+        runbookRefRepo,
+    );
+
+    console.log("Investigation domain initialized");
+
     await bolt.start(3001);
     console.log("Bolt is running on port 3001");
 
