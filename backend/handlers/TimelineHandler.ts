@@ -53,6 +53,10 @@ export class TimelineHandler implements IEventHandler {
       ...(metadata !== undefined ? { metadata } : {}),
     });
 
+    console.log(
+      `[Timeline] Created | investigation=${event.investigationId} | type=${timelineType}`,
+    );
+
     const ids = this._timelineEventIds.get(event.investigationId) ?? [];
     ids.push(timelineEvent.id);
     this._timelineEventIds.set(event.investigationId, ids);

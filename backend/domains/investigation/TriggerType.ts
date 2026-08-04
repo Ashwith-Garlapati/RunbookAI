@@ -8,6 +8,7 @@
 export enum TriggerType {
   SlashCommand = "slash_command",
   MessageShortcut = "message_shortcut",
+  Mention = "mention",
   Webhook = "webhook",
   Alert = "alert",
   ManualAPI = "manual_api",
