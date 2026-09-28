@@ -2,10 +2,19 @@
  * Investigation Domain - Status Lifecycle
  *
  * Defines the complete set of investigation states and enforces
- * valid state transitions. An investigation follows a strict linear lifecycle:
+ * valid state transitions. An investigation follows a strict lifecycle:
  *
  *   Draft → CollectingEvidence → Analyzing → GeneratingFindings
- *   → GeneratingRunbook → WaitingApproval → Completed → Archived
+ *     → Resolved → GeneratingRunbook → WaitingApproval → Completed → Archived
+ *
+ * "Resolved" is a HUMAN action: an engineer marks the incident resolved.
+ * Only after resolution does runbook generation begin. Resolve is a
+ * terminal investigation state (the investigation is finished, but the
+ * incident documentation continues).
+ *
+ * A resolved investigation can be REOPENED (Resolved → CollectingEvidence)
+ * when the incident resurfaces - the investigation resumes evidence
+ * collection instead of starting a duplicate.
  *
  * Invalid transitions throw an error. Use canTransition() to check validity.
  */
@@ -15,6 +24,7 @@ export enum InvestigationStatus {
   CollectingEvidence = "collecting_evidence",
   Analyzing = "analyzing",
   GeneratingFindings = "generating_findings",
+  Resolved = "resolved",
   GeneratingRunbook = "generating_runbook",
   WaitingApproval = "waiting_approval",
   Completed = "completed",
@@ -22,10 +32,27 @@ export enum InvestigationStatus {
 }
 
 const VALID_TRANSITIONS: Readonly<Record<InvestigationStatus, readonly InvestigationStatus[]>> = {
-  [InvestigationStatus.Draft]: [InvestigationStatus.CollectingEvidence],
-  [InvestigationStatus.CollectingEvidence]: [InvestigationStatus.Analyzing],
-  [InvestigationStatus.Analyzing]: [InvestigationStatus.GeneratingFindings],
-  [InvestigationStatus.GeneratingFindings]: [InvestigationStatus.GeneratingRunbook],
+  [InvestigationStatus.Draft]: [
+    InvestigationStatus.CollectingEvidence,
+    InvestigationStatus.Resolved,
+  ],
+  [InvestigationStatus.CollectingEvidence]: [
+    InvestigationStatus.Analyzing,
+    InvestigationStatus.Resolved,
+  ],
+  [InvestigationStatus.Analyzing]: [
+    InvestigationStatus.GeneratingFindings,
+    InvestigationStatus.Resolved,
+  ],
+  [InvestigationStatus.GeneratingFindings]: [
+    InvestigationStatus.GeneratingRunbook,
+    InvestigationStatus.Resolved,
+  ],
+  [InvestigationStatus.Resolved]: [
+    InvestigationStatus.CollectingEvidence,
+    InvestigationStatus.GeneratingRunbook,
+    InvestigationStatus.Completed,
+  ],
   [InvestigationStatus.GeneratingRunbook]: [InvestigationStatus.WaitingApproval],
   [InvestigationStatus.WaitingApproval]: [InvestigationStatus.Completed],
   [InvestigationStatus.Completed]: [InvestigationStatus.Archived],

@@ -1,19 +1,31 @@
 import { Octokit } from "@octokit/rest";
 import dotenv from "dotenv";
 
-import type { GeneratedPRRunbook, GeneratedRunbook } from "./aiEngine.js";
+import type { GeneratedPRRunbook } from "./aiEngine.js";
 
 dotenv.config();
 
-const octokit = new Octokit({
-    auth: process.env.GITHUB_TOKEN
-});
+let _octokit: Octokit | null = null;
 
-const OWNER = process.env.GITHUB_OWNER;
-const REPO = process.env.GITHUB_REPO;
+/**
+ * Lazy GitHub client. Throws only when a GitHub operation is actually
+ * attempted without GITHUB_TOKEN — importing this module never crashes
+ * the server (Slack-only dev boots fine).
+ */
+function getOctokit(): Octokit {
+    if (!_octokit) {
+        const token = process.env.GITHUB_TOKEN;
+        if (!token) {
+            throw new Error("GITHUB_TOKEN is not set — GitHub operations are disabled");
+        }
+        _octokit = new Octokit({ auth: token });
+    }
+    return _octokit;
+}
 
-if (!process.env.GITHUB_TOKEN || !OWNER || !REPO) {
-    throw new Error("Missing required environment variables: GITHUB_TOKEN, GITHUB_OWNER, and GITHUB_REPO must be set");
+/** True when GitHub operations are available (token present). */
+export function isGitHubEnabled(): boolean {
+    return Boolean(process.env.GITHUB_TOKEN);
 }
 const toFileName = (title: string): string => {
     const sanitized = title
@@ -30,7 +42,7 @@ const toFileName = (title: string): string => {
     return sanitized + ".md";
 };
 
-const toMarkdown = (runbook: GeneratedRunbook | GeneratedPRRunbook, approvedBy: string): string => {
+const toMarkdown = (runbook: GeneratedPRRunbook, approvedBy: string): string => {
     const date = new Date().toLocaleDateString("en-GB", {
         day: "numeric",
         month: "long",
@@ -95,7 +107,7 @@ ${formatList(runbook.preventionSteps)}
 
 
 export const publishToGitHub = async (
-    runbook: GeneratedRunbook | GeneratedPRRunbook,
+    runbook: GeneratedPRRunbook,
     approvedBy: string,
     repoOwner: string,
     repoName: string
@@ -111,7 +123,7 @@ export const publishToGitHub = async (
         let existingFileSha: string | undefined;
 
         try {
-            const { data } = await octokit.repos.getContent({
+            const { data } = await getOctokit().repos.getContent({
                 owner: repoOwner,
                 repo: repoName,
                 path: filePath
@@ -123,7 +135,7 @@ export const publishToGitHub = async (
             if (error.status !== 404) throw error;
         }
 
-        const { data } = await octokit.repos.createOrUpdateFileContents({
+        const { data } = await getOctokit().repos.createOrUpdateFileContents({
             owner: repoOwner,
             repo: repoName,
             path: filePath,
@@ -134,7 +146,7 @@ export const publishToGitHub = async (
             ...(existingFileSha ? { sha: existingFileSha } : {})
         });
 
-        const { data: repoData } = await octokit.repos.get({ owner: repoOwner, repo: repoName });
+        const { data: repoData } = await getOctokit().repos.get({ owner: repoOwner, repo: repoName });
         const defaultBranch = repoData.default_branch || "main";
 
         const fileUrl = `https://github.com/${repoOwner}/${repoName}/blob/${defaultBranch}/${filePath}`;
@@ -196,7 +208,7 @@ ${formatList(runbook.preventionSteps)}
 
 ${hiddenData}`;
 
-    const { data } = await octokit.issues.createComment({
+    const { data } = await getOctokit().issues.createComment({
         owner: repoOwner,
         repo: repoName,
         issue_number: prNumber,
@@ -214,7 +226,7 @@ export const deleteComment = async (
     repoName: string
 ): Promise<void> => {
     try {
-        await octokit.issues.deleteComment({
+        await getOctokit().issues.deleteComment({
             owner: repoOwner,
             repo: repoName,
             comment_id: commentId
@@ -238,7 +250,7 @@ export const postStatusComment = async (
         ? `✅ **RunbookAI — Runbook Approved**\n\nRunbook "*${runbookTitle}*" has been saved.\n\n📄 [View Runbook](${githubUrl})`
         : `❌ **RunbookAI — Runbook Rejected**\n\nRunbook "*${runbookTitle}*" was discarded.`;
 
-    await octokit.issues.createComment({
+    await getOctokit().issues.createComment({
         owner: repoOwner,
         repo: repoName,
         issue_number: prNumber,

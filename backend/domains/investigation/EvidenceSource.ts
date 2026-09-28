@@ -8,7 +8,6 @@
 export enum EvidenceSource {
   Slack = "slack",
   GitHub = "github",
-  SigNoz = "signoz",
   Datadog = "datadog",
   Grafana = "grafana",
   Prometheus = "prometheus",

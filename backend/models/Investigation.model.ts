@@ -21,6 +21,10 @@ export interface IInvestigationDoc {
   updatedAt: Date;
   startedAt?: Date;
   completedAt?: Date;
+  resolvedBy?: string;
+  resolvedAt?: Date;
+  reopenedBy?: string;
+  reopenedAt?: Date;
   affectedServices: string[];
   tags: string[];
   evidenceIds: string[];
@@ -53,6 +57,10 @@ const InvestigationSchema = new Schema<IInvestigationDoc>(
     updatedAt: { type: Date, required: true },
     startedAt: { type: Date },
     completedAt: { type: Date },
+    resolvedBy: { type: String },
+    resolvedAt: { type: Date },
+    reopenedBy: { type: String },
+    reopenedAt: { type: Date },
     affectedServices: { type: [String], default: [] },
     tags: { type: [String], default: [] },
     evidenceIds: { type: [String], default: [] },
@@ -68,6 +76,9 @@ const InvestigationSchema = new Schema<IInvestigationDoc>(
 InvestigationSchema.index({ status: 1 });
 InvestigationSchema.index({ createdAt: -1 });
 InvestigationSchema.index({ organizationId: 1 });
+InvestigationSchema.index({ "metadata.teamId": 1, "metadata.channelId": 1 });
+InvestigationSchema.index({ "metadata.teamId": 1, "metadata.channelId": 1, "metadata.threadTs": 1 });
+InvestigationSchema.index({ "metadata.slackChannelId": 1 });
 
 export const InvestigationModel = mongoose.model<IInvestigationDoc>(
   "Investigation",

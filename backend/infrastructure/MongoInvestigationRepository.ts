@@ -32,6 +32,10 @@ function toDomain(doc: IInvestigationDoc): Investigation {
     updatedAt: doc.updatedAt,
     startedAt: doc.startedAt,
     completedAt: doc.completedAt,
+    resolvedBy: doc.resolvedBy as InvestigationProps["resolvedBy"],
+    resolvedAt: doc.resolvedAt as InvestigationProps["resolvedAt"],
+    reopenedBy: doc.reopenedBy as InvestigationProps["reopenedBy"],
+    reopenedAt: doc.reopenedAt as InvestigationProps["reopenedAt"],
     affectedServices: doc.affectedServices,
     tags: doc.tags,
     evidenceIds: doc.evidenceIds as InvestigationProps["evidenceIds"],
@@ -67,6 +71,10 @@ function toDocument(investigation: Investigation): Record<string, unknown> {
     updatedAt: investigation.updatedAt,
     startedAt: investigation.startedAt,
     completedAt: investigation.completedAt,
+    resolvedBy: investigation.resolvedBy,
+    resolvedAt: investigation.resolvedAt,
+    reopenedBy: investigation.reopenedBy,
+    reopenedAt: investigation.reopenedAt,
     affectedServices: investigation.affectedServices,
     tags: investigation.tags,
     evidenceIds: investigation.evidenceIds,
@@ -117,7 +125,53 @@ export class MongoInvestigationRepository implements IInvestigationRepository {
     return docs.map(toDomain);
   }
 
+  async findBySlackChannel(channelId: string): Promise<Investigation[]> {
+    const docs = await InvestigationModel.find({
+      "metadata.slackChannelId": channelId,
+    }).sort({ createdAt: -1 });
+    return docs.map(toDomain);
+  }
+
+  async findReusableBySlackThread(
+    teamId: string,
+    channelId: string,
+    threadTs: string,
+  ): Promise<Investigation[]> {
+    const docs = await InvestigationModel.find({
+      "metadata.teamId": teamId,
+      "metadata.channelId": channelId,
+      "metadata.threadTs": threadTs,
+      status: { $nin: REUSABLE_EXCLUDED_STATUSES },
+    }).sort({ createdAt: -1 });
+    return docs.map(toDomain);
+  }
+
+  async findReusableBySlackChannel(teamId: string, channelId: string): Promise<Investigation[]> {
+    const docs = await InvestigationModel.find({
+      "metadata.teamId": teamId,
+      "metadata.channelId": channelId,
+      status: { $nin: REUSABLE_EXCLUDED_STATUSES },
+    }).sort({ createdAt: -1 });
+    return docs.map(toDomain);
+  }
+
+  async findByReusableSlackUser(params: {
+    teamId: string;
+    createdBy: string;
+    createdAfter: Date;
+  }): Promise<Investigation[]> {
+    const docs = await InvestigationModel.find({
+      "metadata.teamId": params.teamId,
+      createdBy: params.createdBy,
+      createdAt: { $gte: params.createdAfter },
+      status: { $nin: REUSABLE_EXCLUDED_STATUSES },
+    }).sort({ createdAt: -1 });
+    return docs.map(toDomain);
+  }
+
   async delete(id: InvestigationId): Promise<void> {
     await InvestigationModel.findByIdAndDelete(id);
   }
 }
+
+const REUSABLE_EXCLUDED_STATUSES = [Status.Resolved, Status.Completed, Status.Archived];

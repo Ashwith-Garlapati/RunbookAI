@@ -2,7 +2,7 @@
  * Trigger Domain - Trigger Registry
  *
  * Manages registration and lookup of trigger adapters.
- * Allows future additions (GitHub, SigNoz, etc.) without changing dispatcher logic.
+ * Allows future additions (GitHub, etc.) without changing dispatcher logic.
  *
  * The registry is a simple map of adapters keyed by source and type.
  * When a new integration is added, it registers its adapter here.

@@ -6,7 +6,7 @@
  * event occurred, who triggered it, and the raw payload from the source.
  *
  * Triggers are immutable once created. They are the contract between
- * external integrations (Slack, GitHub, SigNoz, etc.) and the Investigation domain.
+ * external integrations (Slack, GitHub, etc.) and the Investigation domain.
  */
 
 import { randomUUID } from "node:crypto";

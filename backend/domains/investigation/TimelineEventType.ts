@@ -10,8 +10,11 @@ export enum TimelineEventType {
   StatusChanged = "status_changed",
   EvidenceAdded = "evidence_added",
   FindingAdded = "finding_added",
+  Resolved = "resolved",
+  Reopened = "reopened",
   RunbookGenerated = "runbook_generated",
   ReportGenerated = "report_generated",
   Completed = "completed",
   Archived = "archived",
+  Associated = "conversation_associated",
 }

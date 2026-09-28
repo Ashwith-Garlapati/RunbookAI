@@ -29,6 +29,41 @@ export interface IInvestigationRepository {
   /** Retrieves all active investigations (not completed or archived). */
   findActive(): Promise<Investigation[]>;
 
+  /**
+   * Retrieves all investigations triggered from the given Slack channel,
+   * most recent first. Used to link @RunbookAI mentions to existing
+   * investigations in the same conversation.
+   */
+  findBySlackChannel(channelId: string): Promise<Investigation[]>;
+
+  /**
+   * Retrieves REUSABLE investigations (not Resolved / Completed / Archived)
+   * associated with an exact Slack thread (teamId + channelId + threadTs),
+   * most recent first. threadTs is "" for non-thread messages.
+   */
+  findReusableBySlackThread(
+    teamId: string,
+    channelId: string,
+    threadTs: string,
+  ): Promise<Investigation[]>;
+
+  /**
+   * Retrieves REUSABLE investigations associated with a Slack channel
+   * (teamId + channelId), regardless of thread, most recent first.
+   */
+  findReusableBySlackChannel(teamId: string, channelId: string): Promise<Investigation[]>;
+
+  /**
+   * Retrieves REUSABLE investigations created by the same user within the
+   * given team after a cut-off time, most recent first. Used for the
+   * "same user within 30 minutes" association fallback.
+   */
+  findByReusableSlackUser(params: {
+    teamId: string;
+    createdBy: string;
+    createdAfter: Date;
+  }): Promise<Investigation[]>;
+
   /** Retrieves all completed investigations. */
   findCompleted(): Promise<Investigation[]>;
 

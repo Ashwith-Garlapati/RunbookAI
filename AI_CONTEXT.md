@@ -44,7 +44,6 @@ No service should directly call AI without going through the Investigation Domai
 ```
 Slack
 GitHub
-SigNoz
 API
 Manual Trigger
 
@@ -171,7 +170,6 @@ Supported trigger sources:
 
 - Slack
 - GitHub
-- SigNoz
 - API
 - Manual
 - Datadog (future)
@@ -222,7 +220,6 @@ Evidence may come from:
 
 - Slack
 - GitHub
-- SigNoz
 - Datadog
 - Grafana
 - Kubernetes
@@ -352,7 +349,6 @@ Examples:
 
 - Slack Connector
 - GitHub Connector
-- SigNoz Connector
 - Datadog Connector
 - Grafana Connector
 - Kubernetes Connector
@@ -380,7 +376,7 @@ The current hackathon MVP focuses on:
 - Runbook generation
 - GitHub publishing
 
-SigNoz integration is the next major milestone.
+Additional observability integrations are future milestones.
 
 ---
 
@@ -388,7 +384,6 @@ SigNoz integration is the next major milestone.
 
 These are planned but intentionally incomplete:
 
-- SigNoz connector
 - Evidence collectors
 - Context Builder
 - AI Investigation Engine

@@ -19,10 +19,15 @@ import { TimelineEventType } from "../domains/investigation/TimelineEventType.js
 
 const EVENT_TO_TIMELINE_TYPE: Record<string, TimelineEventType> = {
   InvestigationCreated: TimelineEventType.InvestigationCreated,
-  InvestigationStarted: TimelineEventType.StatusChanged,
+  // InvestigationStarted is intentionally NOT mapped: InvestigationService
+  // already records a StatusChanged entry synchronously when starting.
+  // Mapping it here would create a duplicate timeline entry.
   StatusChanged: TimelineEventType.StatusChanged,
   EvidenceAdded: TimelineEventType.EvidenceAdded,
   FindingAdded: TimelineEventType.FindingAdded,
+  InvestigationResolved: TimelineEventType.Resolved,
+  InvestigationReopened: TimelineEventType.Reopened,
+  ConversationAssociated: TimelineEventType.Associated,
   RunbookAttached: TimelineEventType.RunbookGenerated,
   ReportGenerated: TimelineEventType.ReportGenerated,
   InvestigationCompleted: TimelineEventType.Completed,
@@ -87,6 +92,12 @@ export class TimelineHandler implements IEventHandler {
         return `Runbook ${payload?.runbookId ?? ""} attached`;
       case "ReportGenerated":
         return `Report ${payload?.reportId ?? ""} generated`;
+      case "InvestigationResolved":
+        return `Investigation resolved by ${payload?.resolvedBy ?? "unknown"}`;
+      case "InvestigationReopened":
+        return `Investigation reopened by ${payload?.reopenedBy ?? "unknown"}`;
+      case "ConversationAssociated":
+        return `Linked to Slack conversation <#${payload?.channelId ?? "unknown"}>`;
       case "InvestigationCompleted":
         return "Investigation completed";
       case "InvestigationArchived":

@@ -57,6 +57,22 @@ export interface ReportGeneratedPayload {
   readonly reportId: ReportId;
 }
 
+export interface InvestigationResolvedPayload {
+  readonly resolvedBy: string;
+}
+
+export interface InvestigationReopenedPayload {
+  readonly reopenedBy: string;
+}
+
+export interface ConversationAssociatedPayload {
+  readonly teamId: string;
+  readonly channelId: string;
+  readonly threadTs: string;
+  readonly rootMessageTs: string;
+  readonly userId: string;
+}
+
 // --- Event Interfaces ---
 
 export interface InvestigationCreatedEvent extends IDomainEvent {
@@ -99,9 +115,24 @@ export interface InvestigationCompletedEvent extends IDomainEvent {
   readonly payload: Record<string, never>;
 }
 
+export interface InvestigationResolvedEvent extends IDomainEvent {
+  readonly eventType: "InvestigationResolved";
+  readonly payload: InvestigationResolvedPayload;
+}
+
+export interface InvestigationReopenedEvent extends IDomainEvent {
+  readonly eventType: "InvestigationReopened";
+  readonly payload: InvestigationReopenedPayload;
+}
+
 export interface InvestigationArchivedEvent extends IDomainEvent {
   readonly eventType: "InvestigationArchived";
   readonly payload: Record<string, never>;
+}
+
+export interface ConversationAssociatedEvent extends IDomainEvent {
+  readonly eventType: "ConversationAssociated";
+  readonly payload: ConversationAssociatedPayload;
 }
 
 // --- Discriminated Union ---
@@ -114,5 +145,8 @@ export type InvestigationDomainEvent =
   | FindingAddedEvent
   | RunbookAttachedEvent
   | ReportGeneratedEvent
+  | InvestigationResolvedEvent
+  | InvestigationReopenedEvent
   | InvestigationCompletedEvent
-  | InvestigationArchivedEvent;
+  | InvestigationArchivedEvent
+  | ConversationAssociatedEvent;

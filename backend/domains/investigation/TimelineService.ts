@@ -72,9 +72,34 @@ export class TimelineService {
 
   /**
    * Returns the full chronological timeline for an investigation.
+   * Falls back to cached in-memory events only; use hydrate() to load
+   * persisted events after a restart.
    */
   getTimeline(investigationId: InvestigationId): readonly TimelineEvent[] {
     return this._events.get(investigationId) ?? [];
+  }
+
+  /**
+   * Loads persisted timeline events from the repository into the cache.
+   * Merges by event ID (no duplicates) and sorts chronologically.
+   * Call after a restart before reading a timeline.
+   */
+  async hydrate(investigationId: InvestigationId): Promise<readonly TimelineEvent[]> {
+    if (!this._repository) {
+      return this.getTimeline(investigationId);
+    }
+    const persisted = await this._repository.findByInvestigationId(investigationId);
+    const cached = this._events.get(investigationId) ?? [];
+    const seen = new Set(cached.map((e) => e.id));
+    for (const event of persisted) {
+      if (!seen.has(event.id)) {
+        cached.push(event);
+        seen.add(event.id);
+      }
+    }
+    cached.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+    this._events.set(investigationId, cached);
+    return cached;
   }
 
   /**

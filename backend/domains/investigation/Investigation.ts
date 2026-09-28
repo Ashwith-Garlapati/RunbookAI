@@ -55,6 +55,10 @@ export interface InvestigationProps {
   readonly updatedAt: Date;
   readonly startedAt?: Date | undefined;
   readonly completedAt?: Date | undefined;
+  readonly resolvedBy?: UserId | undefined;
+  readonly resolvedAt?: Date | undefined;
+  readonly reopenedBy?: UserId | undefined;
+  readonly reopenedAt?: Date | undefined;
   readonly affectedServices: ServiceName[];
   readonly tags: Tag[];
   readonly evidenceIds: EvidenceId[];
@@ -99,6 +103,10 @@ export class Investigation {
   private _updatedAt: Date;
   private _startedAt: Date | undefined;
   private _completedAt: Date | undefined;
+  private _resolvedBy: UserId | undefined;
+  private _resolvedAt: Date | undefined;
+  private _reopenedBy: UserId | undefined;
+  private _reopenedAt: Date | undefined;
   private _affectedServices: ServiceName[];
   private _tags: Tag[];
   private _evidenceIds: EvidenceId[];
@@ -121,6 +129,10 @@ export class Investigation {
     this._updatedAt = props.updatedAt;
     this._startedAt = props.startedAt;
     this._completedAt = props.completedAt;
+    this._resolvedBy = props.resolvedBy;
+    this._resolvedAt = props.resolvedAt;
+    this._reopenedBy = props.reopenedBy;
+    this._reopenedAt = props.reopenedAt;
     this._affectedServices = [...props.affectedServices];
     this._tags = [...props.tags];
     this._evidenceIds = [...props.evidenceIds];
@@ -209,6 +221,22 @@ export class Investigation {
     return this._completedAt;
   }
 
+  get resolvedBy(): UserId | undefined {
+    return this._resolvedBy;
+  }
+
+  get resolvedAt(): Date | undefined {
+    return this._resolvedAt;
+  }
+
+  get reopenedBy(): UserId | undefined {
+    return this._reopenedBy;
+  }
+
+  get reopenedAt(): Date | undefined {
+    return this._reopenedAt;
+  }
+
   get affectedServices(): readonly ServiceName[] {
     return this._affectedServices;
   }
@@ -286,9 +314,46 @@ export class Investigation {
   /**
    * GeneratingFindings → GeneratingRunbook
    * Findings are ready; runbook generation begins.
+   *
+   * NOTE: runbook generation must ONLY happen after the incident has been
+   * resolved by a human (see resolve()). The transition into this state is
+   * only reachable from Resolved (or from GeneratingFindings when the
+   * runbook pipeline is driven by the AI investigation flow).
    */
   generateRunbook(): void {
     this.transitionTo(InvestigationStatus.GeneratingRunbook);
+  }
+
+  /**
+   * Draft/CollectingEvidence/Analyzing/GeneratingFindings → Resolved
+   *
+   * A human marks the incident as resolved. Records who resolved it and
+   * when. This is NOT archived yet - runbook generation follows resolution.
+   * Runbook generation happens AFTER this call, never before.
+   */
+  resolve(resolvedBy: string): void {
+    this.transitionTo(InvestigationStatus.Resolved);
+    this._resolvedBy = resolvedBy;
+    this._resolvedAt = new Date();
+    this.emitEvent("InvestigationResolved", {
+      resolvedBy,
+    });
+  }
+
+  /**
+   * Resolved → CollectingEvidence
+   *
+   * Reopens a resolved investigation when the incident resurfaces. The
+   * investigation resumes evidence collection instead of creating a
+   * duplicate. Only valid from Resolved; records who reopened it and when.
+   */
+  reopen(reopenedBy: string): void {
+    this.transitionTo(InvestigationStatus.CollectingEvidence);
+    this._reopenedBy = reopenedBy;
+    this._reopenedAt = new Date();
+    this.emitEvent("InvestigationReopened", {
+      reopenedBy,
+    });
   }
 
   /**
@@ -382,6 +447,51 @@ export class Investigation {
     this.emitEvent("ReportGenerated", {
       reportId,
     });
+  }
+
+  // ===========================
+  //  Conversation Association
+  // ===========================
+
+  /**
+   * Links this investigation to a Slack conversation and stores the Slack
+   * context (teamId / channelId / threadTs / rootMessageTs) on its metadata.
+   *
+   * Emits a single "ConversationAssociated" domain event ONLY when the
+   * conversation was not already associated - repeated calls for the same
+   * conversation are idempotent and produce no duplicate events.
+   */
+  associateConversation(context: {
+    readonly teamId?: string;
+    readonly channelId?: string;
+    readonly threadTs?: string;
+    readonly rootMessageTs?: string;
+    readonly userId?: string;
+  }): void {
+    const teamId = context.teamId ?? "";
+    const channelId = context.channelId ?? "";
+    const threadTs = context.threadTs ?? "";
+
+    const alreadyAssociated =
+      channelId !== "" &&
+      String(this._metadata.channelId ?? "") === channelId &&
+      String(this._metadata.teamId ?? "") === teamId &&
+      String(this._metadata.threadTs ?? "") === threadTs;
+
+    if (teamId !== "") this.updateMetadata("teamId", teamId);
+    if (channelId !== "") this.updateMetadata("channelId", channelId);
+    if (context.threadTs !== undefined) this.updateMetadata("threadTs", threadTs);
+    if (context.rootMessageTs !== undefined) this.updateMetadata("rootMessageTs", context.rootMessageTs);
+
+    if (!alreadyAssociated && channelId !== "" && teamId !== "") {
+      this.emitEvent("ConversationAssociated", {
+        teamId,
+        channelId,
+        threadTs,
+        rootMessageTs: context.rootMessageTs ?? "",
+        userId: context.userId ?? this.createdBy,
+      });
+    }
   }
 
   // ===========================

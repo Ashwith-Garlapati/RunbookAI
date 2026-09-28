@@ -6,7 +6,7 @@
  *
  * The Investigation aggregate stores evidence as references (EvidenceReference).
  * These interfaces define the shape of evidence data that will be populated
- * by future collector integrations (Slack, GitHub, SigNoz, etc.).
+ * by future collector integrations (Slack, GitHub, etc.).
  */
 
 import type { EvidenceId, InvestigationId } from "./types.js";

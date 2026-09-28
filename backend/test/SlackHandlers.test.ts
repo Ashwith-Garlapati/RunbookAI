@@ -10,9 +10,12 @@ import { SlackMentionAdapter } from "../domains/trigger/adapters/SlackMentionAda
 import { TriggerSource } from "../domains/investigation/TriggerSource.js";
 import { TriggerType } from "../domains/investigation/TriggerType.js";
 import type { InvestigationService } from "../domains/investigation/InvestigationService.js";
+import { MentionIntentDetector } from "../services/MentionIntentDetector.js";
+import type { QuestionAnsweringService } from "../services/QuestionAnsweringService.js";
+import { SlackIncidentCardService } from "../services/SlackIncidentCardService.js";
 
 function createMockInvestigationService(): InvestigationService {
-  return {
+  const service = {
     createInvestigation: vi.fn(async (params) => ({
       id: `inv-${Date.now()}`,
       title: params.title,
@@ -22,7 +25,27 @@ function createMockInvestigationService(): InvestigationService {
       trigger: params.trigger,
       createdBy: params.createdBy,
     })),
+    createOrAssociateInvestigation: vi.fn(async (params) => {
+      const investigation = await service.createInvestigation(params);
+      return { kind: "created", investigation };
+    }),
+    findBySlackContext: vi.fn(async () => undefined),
+    resolveInvestigation: vi.fn(async () => ({})),
+    updateInvestigationMetadata: vi.fn(async () => ({})),
+    getInvestigation: vi.fn(async () => null),
+    getTimeline: vi.fn(async () => []),
   } as unknown as InvestigationService;
+  return service;
+}
+
+function createMockQuestionService(): QuestionAnsweringService {
+  return {
+    answer: vi.fn(async () => ({ answer: "mock answer", contextFound: true })),
+  } as unknown as QuestionAnsweringService;
+}
+
+function createMockCardService(client: any): SlackIncidentCardService {
+  return new SlackIncidentCardService(client);
 }
 
 function createMockBolt() {
@@ -53,6 +76,14 @@ function createMockSlackClient() {
     views: {
       open: vi.fn(async () => ({})),
     },
+    conversations: {
+      history: vi.fn(async () => ({ messages: [] })),
+      create: vi.fn(async () => ({ channel: { id: "CNEW" } })),
+    },
+    pins: {
+      add: vi.fn(async () => ({})),
+      remove: vi.fn(async () => ({})),
+    },
   };
 }
 
@@ -61,6 +92,20 @@ describe("Slack Handlers - Trigger Layer Integration", () => {
   let factory: TriggerFactory;
   let dispatcher: TriggerDispatcher;
   let service: InvestigationService;
+  let client: ReturnType<typeof createMockSlackClient>;
+  let intentDetector: MentionIntentDetector;
+
+  function makeDeps() {
+    return {
+      registry,
+      factory,
+      dispatcher,
+      investigationService: service,
+      intentDetector,
+      questionService: createMockQuestionService(),
+      cardService: createMockCardService(client),
+    };
+  }
 
   beforeEach(() => {
     registry = new TriggerRegistry();
@@ -72,33 +117,33 @@ describe("Slack Handlers - Trigger Layer Integration", () => {
     factory = new TriggerFactory(validator);
     service = createMockInvestigationService();
     dispatcher = new TriggerDispatcher(service);
+    client = createMockSlackClient();
+    intentDetector = new MentionIntentDetector();
   });
+
+  const basicCommand = {
+    command: "/investigate",
+    text: "checkout API failures",
+    user_id: "U12345",
+    user_name: "john.doe",
+    channel_id: "C12345",
+    channel_name: "incidents",
+    team_id: "T12345",
+    trigger_id: "1234567890.123456",
+    api_app_id: "A12345",
+    token: "verification_token",
+    response_url: "https://hooks.slack.com/actions/123",
+  };
 
   describe("/investigate slash command", () => {
     it("creates investigation and responds with ID", async () => {
       const bolt = createMockBolt();
-      const client = createMockSlackClient();
-
-      registerSlackHandlers(bolt as any, { registry, factory, dispatcher });
+      registerSlackHandlers(bolt as any, makeDeps());
 
       const handler = bolt.handlers["command:/investigate"];
       expect(handler).toBeDefined();
 
-      const command = {
-        command: "/investigate",
-        text: "checkout API failures",
-        user_id: "U12345",
-        user_name: "john.doe",
-        channel_id: "C12345",
-        channel_name: "incidents",
-        team_id: "T12345",
-        trigger_id: "1234567890.123456",
-        api_app_id: "A12345",
-        token: "verification_token",
-        response_url: "https://hooks.slack.com/actions/123",
-      };
-
-      await handler({ command, ack: vi.fn(), client });
+      await handler({ command: basicCommand, ack: vi.fn(), client });
 
       expect(service.createInvestigation).toHaveBeenCalled();
       expect(client.chat.postEphemeral).toHaveBeenCalled();
@@ -108,85 +153,97 @@ describe("Slack Handlers - Trigger Layer Integration", () => {
 
     it("handles empty text", async () => {
       const bolt = createMockBolt();
-      const client = createMockSlackClient();
-
-      registerSlackHandlers(bolt as any, { registry, factory, dispatcher });
+      registerSlackHandlers(bolt as any, makeDeps());
 
       const handler = bolt.handlers["command:/investigate"];
 
-      const command = {
-        command: "/investigate",
-        text: "",
-        user_id: "U12345",
-        user_name: "john.doe",
-        channel_id: "C12345",
-        channel_name: "incidents",
-        team_id: "T12345",
-        trigger_id: "1234567890.123456",
-        api_app_id: "A12345",
-        token: "verification_token",
-        response_url: "https://hooks.slack.com/actions/123",
-      };
-
-      await handler({ command, ack: vi.fn(), client });
+      await handler({ command: { ...basicCommand, text: "" }, ack: vi.fn(), client });
 
       expect(service.createInvestigation).toHaveBeenCalled();
     });
 
-    it("returns error when dispatch fails", async () => {
+    it("does NOT read Slack channel history", async () => {
       const bolt = createMockBolt();
-      const client = createMockSlackClient();
-
-      (service.createInvestigation as any).mockRejectedValue(new Error("Database error"));
-
-      registerSlackHandlers(bolt as any, { registry, factory, dispatcher });
+      registerSlackHandlers(bolt as any, makeDeps());
 
       const handler = bolt.handlers["command:/investigate"];
 
-      const command = {
-        command: "/investigate",
-        text: "test issue",
-        user_id: "U12345",
-        user_name: "john.doe",
-        channel_id: "C12345",
-        channel_name: "incidents",
-        team_id: "T12345",
-        trigger_id: "1234567890.123456",
-        api_app_id: "A12345",
-        token: "verification_token",
-        response_url: "https://hooks.slack.com/actions/123",
-      };
+      await handler({ command: basicCommand, ack: vi.fn(), client });
 
-      await handler({ command, ack: vi.fn(), client });
+      expect(client.conversations.history).not.toHaveBeenCalled();
+    });
+
+    it("never goes through the association flow (always clean creation)", async () => {
+      const bolt = createMockBolt();
+      registerSlackHandlers(bolt as any, makeDeps());
+
+      const dispatchSpy = vi.spyOn(dispatcher, "dispatch");
+      const handler = bolt.handlers["command:/investigate"];
+
+      await handler({ command: basicCommand, ack: vi.fn(), client });
+
+      expect(dispatchSpy).toHaveBeenCalled();
+      const [, options] = dispatchSpy.mock.calls[0];
+      expect(options).toBeUndefined();
+      expect(service.createOrAssociateInvestigation).not.toHaveBeenCalled();
+      expect(service.createInvestigation).toHaveBeenCalled();
+      dispatchSpy.mockRestore();
+    });
+
+    it("does NOT create an incident channel", async () => {
+      const bolt = createMockBolt();
+      registerSlackHandlers(bolt as any, makeDeps());
+
+      const handler = bolt.handlers["command:/investigate"];
+
+      await handler({ command: basicCommand, ack: vi.fn(), client });
+
+      expect(client.conversations.create).not.toHaveBeenCalled();
+    });
+
+    it("does NOT post or pin an investigation card", async () => {
+      const bolt = createMockBolt();
+      registerSlackHandlers(bolt as any, makeDeps());
+
+      const handler = bolt.handlers["command:/investigate"];
+
+      await handler({ command: basicCommand, ack: vi.fn(), client });
+
+      expect(client.pins.add).not.toHaveBeenCalled();
+      const ephemeral = (client.chat.postEphemeral as any).mock.calls[0][0];
+      expect(ephemeral.blocks).toBeDefined();
+      // The confirmation only mentions Evidence: 0 collected - no card was pinned.
+      expect(JSON.stringify(ephemeral.blocks)).toContain("Evidence:");
+    });
+
+    it("returns error when dispatch fails", async () => {
+      const bolt = createMockBolt();
+      (service.createInvestigation as any).mockRejectedValue(new Error("Database error"));
+
+      registerSlackHandlers(bolt as any, makeDeps());
+
+      const handler = bolt.handlers["command:/investigate"];
+
+      await handler({ command: { ...basicCommand, text: "test issue" }, ack: vi.fn(), client });
 
       expect(client.chat.postEphemeral).toHaveBeenCalled();
       const callArgs = (client.chat.postEphemeral as any).mock.calls[0][0];
-      expect(callArgs.text).toContain("Failed");
+      expect(callArgs.text).toContain("Something went wrong");
     });
   });
 
   describe("/runbook start slash command", () => {
     it("creates investigation via Trigger Layer", async () => {
       const bolt = createMockBolt();
-      const client = createMockSlackClient();
-
-      registerSlackHandlers(bolt as any, { registry, factory, dispatcher });
+      registerSlackHandlers(bolt as any, makeDeps());
 
       const handler = bolt.handlers["command:/runbook"];
       expect(handler).toBeDefined();
 
       const command = {
+        ...basicCommand,
         command: "/runbook",
         text: "start database connection issues",
-        user_id: "U12345",
-        user_name: "john.doe",
-        channel_id: "C12345",
-        channel_name: "incidents",
-        team_id: "T12345",
-        trigger_id: "1234567890.123456",
-        api_app_id: "A12345",
-        token: "verification_token",
-        response_url: "https://hooks.slack.com/actions/123",
       };
 
       await handler({ command, ack: vi.fn(), client });
@@ -197,38 +254,46 @@ describe("Slack Handlers - Trigger Layer Integration", () => {
 
     it("does not create investigation for non-start subcommands", async () => {
       const bolt = createMockBolt();
-      const client = createMockSlackClient();
-
-      registerSlackHandlers(bolt as any, { registry, factory, dispatcher });
+      registerSlackHandlers(bolt as any, makeDeps());
 
       const handler = bolt.handlers["command:/runbook"];
 
       const command = {
+        ...basicCommand,
         command: "/runbook",
         text: "search database",
-        user_id: "U12345",
-        user_name: "john.doe",
-        channel_id: "C12345",
-        channel_name: "incidents",
-        team_id: "T12345",
-        trigger_id: "1234567890.123456",
-        api_app_id: "A12345",
-        token: "verification_token",
-        response_url: "https://hooks.slack.com/actions/123",
       };
 
       await handler({ command, ack: vi.fn(), client });
 
       expect(service.createInvestigation).not.toHaveBeenCalled();
     });
+
+    it("behaves exactly like /investigate (no history, no channel, no card)", async () => {
+      const bolt = createMockBolt();
+      registerSlackHandlers(bolt as any, makeDeps());
+
+      const handler = bolt.handlers["command:/runbook"];
+
+      await handler(
+        {
+          command: { ...basicCommand, command: "/runbook", text: "start db issues" },
+          ack: vi.fn(),
+          client,
+        },
+      );
+
+      expect(service.createInvestigation).toHaveBeenCalled();
+      expect(client.conversations.history).not.toHaveBeenCalled();
+      expect(client.conversations.create).not.toHaveBeenCalled();
+      expect(client.pins.add).not.toHaveBeenCalled();
+    });
   });
 
   describe("@RunbookAI mention", () => {
     it("creates investigation from mention", async () => {
       const bolt = createMockBolt();
-      const client = createMockSlackClient();
-
-      registerSlackHandlers(bolt as any, { registry, factory, dispatcher });
+      registerSlackHandlers(bolt as any, makeDeps());
 
       const handler = bolt.handlers["event:app_mention"];
       expect(handler).toBeDefined();
@@ -251,9 +316,7 @@ describe("Slack Handlers - Trigger Layer Integration", () => {
 
     it("ignores bot messages", async () => {
       const bolt = createMockBolt();
-      const client = createMockSlackClient();
-
-      registerSlackHandlers(bolt as any, { registry, factory, dispatcher });
+      registerSlackHandlers(bolt as any, makeDeps());
 
       const handler = bolt.handlers["event:app_mention"];
 
@@ -274,9 +337,7 @@ describe("Slack Handlers - Trigger Layer Integration", () => {
 
     it("ignores mentions containing only the bot mention", async () => {
       const bolt = createMockBolt();
-      const client = createMockSlackClient();
-
-      registerSlackHandlers(bolt as any, { registry, factory, dispatcher });
+      registerSlackHandlers(bolt as any, makeDeps());
 
       const handler = bolt.handlers["event:app_mention"];
 
@@ -297,9 +358,7 @@ describe("Slack Handlers - Trigger Layer Integration", () => {
 
     it("responds with investigation ID, status and trigger", async () => {
       const bolt = createMockBolt();
-      const client = createMockSlackClient();
-
-      registerSlackHandlers(bolt as any, { registry, factory, dispatcher });
+      registerSlackHandlers(bolt as any, makeDeps());
 
       const handler = bolt.handlers["event:app_mention"];
 
@@ -315,18 +374,22 @@ describe("Slack Handlers - Trigger Layer Integration", () => {
 
       await handler({ event, client });
 
-      const postMessageArgs = (client.chat.postMessage as any).mock.calls[0][0];
-      const blockText = JSON.stringify(postMessageArgs.blocks);
+      const postMessageCalls = (client.chat.postMessage as any).mock.calls;
+      const confirmation = postMessageCalls.find(
+        (call: any) =>
+          JSON.stringify(call[0].blocks ?? []).includes("Investigation Created"),
+      );
+      expect(confirmation).toBeDefined();
+      const blockText = JSON.stringify(confirmation[0].blocks);
       expect(blockText).toContain("Investigation Created");
       expect(blockText).toContain("Draft");
-      expect(blockText).toContain("Mention");
+      expect(blockText).toContain("Evidence:");
+      expect(blockText).toContain("Next steps:");
     });
 
     it("supports thread replies", async () => {
       const bolt = createMockBolt();
-      const client = createMockSlackClient();
-
-      registerSlackHandlers(bolt as any, { registry, factory, dispatcher });
+      registerSlackHandlers(bolt as any, makeDeps());
 
       const handler = bolt.handlers["event:app_mention"];
 
@@ -352,9 +415,7 @@ describe("Slack Handlers - Trigger Layer Integration", () => {
   describe("Message shortcut", () => {
     it("creates investigation from shortcut", async () => {
       const bolt = createMockBolt();
-      const client = createMockSlackClient();
-
-      registerSlackHandlers(bolt as any, { registry, factory, dispatcher });
+      registerSlackHandlers(bolt as any, makeDeps());
 
       const handler = bolt.handlers["shortcut:investigate_with_runbookai"];
       expect(handler).toBeDefined();
@@ -385,6 +446,74 @@ describe("Slack Handlers - Trigger Layer Integration", () => {
 
       expect(service.createInvestigation).toHaveBeenCalled();
       expect(client.chat.postEphemeral).toHaveBeenCalled();
+      expect(client.pins.add).not.toHaveBeenCalled();
+    });
+
+    it("uses the same association logic as mentions (associate dispatch)", async () => {
+      const bolt = createMockBolt();
+      registerSlackHandlers(bolt as any, makeDeps());
+
+      const dispatchSpy = vi.spyOn(dispatcher, "dispatch");
+
+      const shortcut = {
+        type: "message_action",
+        callback_id: "investigate_with_runbookai",
+        user: { id: "U12345", username: "john.doe", name: "John Doe" },
+        channel: { id: "C12345", name: "incidents" },
+        message: { text: "checkout API 500s", ts: "1234567890.123456" },
+        team: { id: "T12345" },
+        trigger_id: "1234567890.123456",
+        api_app_id: "A12345",
+        token: "verification_token",
+      };
+
+      await (bolt.handlers["shortcut:investigate_with_runbookai"] as any)({
+        shortcut,
+        ack: vi.fn(),
+        client,
+      });
+
+      expect(dispatchSpy).toHaveBeenCalled();
+      const [triggerArg, options] = dispatchSpy.mock.calls[0];
+      expect(options).toEqual({ associate: true });
+      expect(triggerArg.type).toBe(TriggerType.MessageShortcut);
+      expect(service.createOrAssociateInvestigation).toHaveBeenCalled();
+      dispatchSpy.mockRestore();
+    });
+
+    it("reuses an existing investigation through the shortcut (same ID)", async () => {
+      (service.createOrAssociateInvestigation as any).mockResolvedValue({
+        kind: "reused",
+        association: "channel",
+        investigation: {
+          id: "INV-001",
+          title: "Checkout API failures",
+          status: "collecting_evidence",
+          createdAt: new Date(),
+          metadata: {},
+        },
+      });
+
+      const bolt = createMockBolt();
+      registerSlackHandlers(bolt as any, makeDeps());
+      const handler = bolt.handlers["shortcut:investigate_with_runbookai"];
+      const shortcut = {
+        type: "message.shortcut",
+        callback_id: "investigate_with_runbookai",
+        user: { id: "U12345", username: "john.doe" },
+        channel: { id: "C12345", name: "incidents" },
+        message: { text: "checkout API 500s", ts: "1234567890.123456" },
+        team: { id: "T12345" },
+        trigger_id: "1234567890.123456",
+        api_app_id: "A12345",
+        token: "verification_token",
+      };
+
+      await handler({ shortcut, ack: vi.fn(), client });
+
+      const ephemeral = (client.chat.postEphemeral as any).mock.calls[0][0];
+      expect(ephemeral.text).toContain("Investigation Reused");
+      expect(JSON.stringify(ephemeral.blocks)).toContain("INV-001");
     });
   });
 
@@ -419,9 +548,7 @@ describe("Slack Handlers - Trigger Layer Integration", () => {
   describe("Validation failures", () => {
     it("returns error for invalid slash command payload", async () => {
       const bolt = createMockBolt();
-      const client = createMockSlackClient();
-
-      registerSlackHandlers(bolt as any, { registry, factory, dispatcher });
+      registerSlackHandlers(bolt as any, makeDeps());
 
       const handler = bolt.handlers["command:/investigate"];
 

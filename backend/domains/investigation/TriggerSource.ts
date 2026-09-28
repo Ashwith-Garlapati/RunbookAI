@@ -8,7 +8,6 @@
 export enum TriggerSource {
   Slack = "slack",
   GitHub = "github",
-  SigNoz = "signoz",
   Datadog = "datadog",
   Grafana = "grafana",
   Prometheus = "prometheus",

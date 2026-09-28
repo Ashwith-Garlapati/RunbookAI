@@ -2,7 +2,7 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import mongoose from "mongoose";
-import { App, ExpressReceiver, type Installation } from "@slack/bolt";
+import { App, ExpressReceiver, SocketModeReceiver, type Installation } from "@slack/bolt";
 import { Octokit } from "@octokit/rest";
 
 import InstallationModel from "./models/Installation.model.js";
@@ -17,14 +17,12 @@ import {
     publishToGitHub,
     postRunbookComment,
     deleteComment,
-    postStatusComment
+    postStatusComment,
+    isGitHubEnabled
 } from "./services/githubPublisher.js";
 
 import { MongoInvestigationRepository } from "./infrastructure/MongoInvestigationRepository.js";
 import { MongoTimelineRepository } from "./infrastructure/MongoTimelineRepository.js";
-import { MongoFindingRepository } from "./infrastructure/MongoFindingRepository.js";
-import { MongoReportRepository } from "./infrastructure/MongoReportRepository.js";
-import { MongoRunbookReferenceRepository } from "./infrastructure/MongoRunbookReferenceRepository.js";
 import { InProcessEventBus } from "./infrastructure/InProcessEventBus.js";
 import { InvestigationService } from "./domains/investigation/InvestigationService.js";
 import { TimelineService } from "./domains/investigation/TimelineService.js";
@@ -41,6 +39,25 @@ import { SlackSlashCommandAdapter } from "./domains/trigger/adapters/SlackSlashC
 import { SlackShortcutAdapter } from "./domains/trigger/adapters/SlackShortcutAdapter.js";
 import { SlackMentionAdapter } from "./domains/trigger/adapters/SlackMentionAdapter.js";
 import { registerSlackHandlers } from "./handlers/SlackHandlers.js";
+import { MentionIntentDetector } from "./services/MentionIntentDetector.js";
+import { QuestionAnsweringService } from "./services/QuestionAnsweringService.js";
+import { SlackIncidentCardService } from "./services/SlackIncidentCardService.js";
+import { SlackCardHandler } from "./handlers/SlackCardHandler.js";
+
+// Incident Coordination Layer (deterministic, no AI)
+import { IncidentBus } from "./domains/incident/IncidentBus.js";
+import { IncidentCoordinator } from "./domains/incident/IncidentCoordinator.js";
+import { DefaultMembershipResolver } from "./domains/incident/IncidentRepository.js";
+import { MongoIncidentRepository, MongoIdempotencyStore } from "./infrastructure/MongoIncidentRepository.js";
+import { SlackGateway } from "./slack/SlackGateway.js";
+import { registerIncidentSlackHandlers } from "./slack/IncidentSlackHandlers.js";
+import { IncidentAuditHandler, IncidentNotifier } from "./handlers/IncidentTimelineHandler.js";
+import { createSlackClientProvider } from "./slack/slackClientProvider.js";
+import { createIncidentsRouter } from "./api/incidents.routes.js";
+import { encryptToken, decryptToken } from "./slack/tokenCrypto.js";
+import { createSlackAuthorize } from "./slack/slackAuthorize.js";
+import { IncidentModel } from "./models/Incident.model.js";
+import { SlackProcessedEventModel, AuditLogModel } from "./models/IncidentOps.model.js";
 
 dotenv.config();
 
@@ -57,14 +74,22 @@ app.use((req, res, next) => {
     }
 });
 
-if (!process.env.GITHUB_TOKEN) {
-    console.error("GITHUB_TOKEN is required");
-    process.exit(1);
+app.get("/healthz", (_req, res) => {
+    res.status(200).json({ status: "ok", service: "runbookai-backend" });
+});
+
+const githubEnabled = isGitHubEnabled();
+if (!githubEnabled) {
+    console.warn("⚠ GITHUB_TOKEN not set — GitHub webhook flow disabled; running in Slack-only mode");
 }
 
-const octokit = new Octokit({
-    auth: process.env.GITHUB_TOKEN
-});
+const getOctokit = (): Octokit => {
+    const token = process.env.GITHUB_TOKEN;
+    if (!token) {
+        throw new Error("GITHUB_TOKEN is not set — GitHub operations are disabled");
+    }
+    return new Octokit({ auth: token });
+};
 
 const connectDB = async () => {
     await mongoose.connect(process.env.MONGODB_URI || "").then(() => {
@@ -75,18 +100,21 @@ const connectDB = async () => {
     });
 }
 
-const receiver = new ExpressReceiver({
+const expressReceiver = new ExpressReceiver({
     signingSecret: process.env.SLACK_SIGNING_SECRET || "",
     clientId: process.env.SLACK_CLIENT_ID || "",
     clientSecret: process.env.SLACK_CLIENT_SECRET || "",
-    stateSecret: 'runbookai-state-secret',
+    stateSecret: process.env.SLACK_STATE_SECRET || 'runbookai-state-secret',
     scopes: [
         'channels:history',
+        'channels:read',
         'channels:manage',
         'groups:history',
+        'groups:read',
         'chat:write',
         'im:write',
         'users:read',
+        'pins:write',
         'commands',
         'app_mentions:read'
     ],
@@ -104,8 +132,9 @@ const receiver = new ExpressReceiver({
                     $set: {
                         teamId,
                         teamName: installation.team?.name,
-                        botToken: installation.bot?.token,
+                        botToken: installation.bot?.token ? encryptToken(installation.bot.token) : undefined,
                         botUserId: installation.bot?.userId,
+                        botId: installation.bot?.id,
                     },
                 },
                 { upsert: true, new: true }
@@ -128,7 +157,7 @@ const receiver = new ExpressReceiver({
                     name: doc.teamName
                 },
                 bot: {
-                    token: doc.botToken,
+                    token: decryptToken(doc.botToken),
                     userId: doc.botUserId,
                     scopes: [],
                     id: doc.botUserId
@@ -150,11 +179,43 @@ const receiver = new ExpressReceiver({
     },
 });
 
-console.log("✓ ExpressReceiver Initialized");
+console.log("✓ ExpressReceiver Initialized (OAuth)");
 
-const bolt = new App({ receiver });
+// ExpressReceiver always serves the OAuth install/callback routes.
+// Events arrive via Socket Mode when SLACK_APP_TOKEN is set, otherwise via
+// the HTTP receiver (Slack Events API webhook).
+app.use(expressReceiver.app);
 
-app.use(receiver.app);
+const useSocketMode = Boolean(process.env.SLACK_APP_TOKEN);
+if (useSocketMode) {
+    console.log("✓ Slack Socket Mode enabled (events over WebSocket)");
+} else {
+    console.warn("⚠ SLACK_APP_TOKEN not set — falling back to HTTP Events API; set it to use Socket Mode");
+}
+
+const installationLookup = {
+    findByTeam: async (teamId: string) => {
+        const doc = await InstallationModel.findOne({ teamId }).lean();
+        if (!doc) return null;
+        return {
+            teamId: doc.teamId,
+            teamName: doc.teamName ?? undefined,
+            botToken: doc.botToken,
+            botUserId: doc.botUserId ?? "",
+            botId: doc.botId ?? null,
+        };
+    },
+};
+
+const bolt = useSocketMode
+    ? new App({
+        receiver: new SocketModeReceiver({ appToken: process.env.SLACK_APP_TOKEN as string }),
+        authorize: createSlackAuthorize({
+            lookup: installationLookup,
+            decrypt: decryptToken,
+        }),
+    })
+    : new App({ receiver: expressReceiver });
 
 // =====================================================================
 // Trigger Layer
@@ -185,9 +246,6 @@ const start = async () => {
     // ---- Repositories ----
     const investigationRepo = new MongoInvestigationRepository();
     const timelineRepo = new MongoTimelineRepository();
-    const findingRepo = new MongoFindingRepository();
-    const reportRepo = new MongoReportRepository();
-    const runbookRefRepo = new MongoRunbookReferenceRepository();
 
     // ---- Event Bus ----
     const eventBus = new InProcessEventBus();
@@ -209,12 +267,23 @@ const start = async () => {
         investigationRepo,
         eventBus,
         timelineService,
-        findingRepo,
-        reportRepo,
-        runbookRefRepo,
     );
 
     console.log("✓ Investigation Domain Initialized");
+
+    // ---- Mention Assistant (intent detection + question answering) ----
+    const intentDetector = new MentionIntentDetector();
+    const questionService = new QuestionAnsweringService(investigationService);
+
+    // ---- Slack Incident Card (post / pin / update / unpin) ----
+    // The card lifecycle is event-driven: posted by the mention handler,
+    // updated on resolution, unpinned once the runbook is attached
+    // (runbook generation happens AFTER resolution, never in the trigger path).
+    const cardService = new SlackIncidentCardService(bolt.client);
+    const slackCardHandler = new SlackCardHandler(cardService, investigationService);
+    eventBus.subscribe("*", slackCardHandler);
+
+    console.log("✓ Mention Assistant + Slack Card Initialized");
 
     // ---- Trigger Layer (initialized once at startup) ----
     const triggerRegistry = new TriggerRegistry();
@@ -228,14 +297,84 @@ const start = async () => {
 
     console.log("✓ Trigger Layer Initialized");
 
+    // ---- TEMPORARY DIAGNOSTIC (remove after shortcut debugging) ----
+    // Logs every inbound Slack envelope BEFORE listener matching: type,
+    // callback_id, team and user IDs only. Never tokens/secrets/payloads.
+    bolt.use(async ({ body, next }) => {
+        try {
+            const b = body as unknown as {
+                type?: unknown;
+                callback_id?: unknown;
+                team?: { id?: unknown } | unknown;
+                team_id?: unknown;
+                user?: { id?: unknown } | unknown;
+                api_app_id?: unknown;
+            };
+            const team =
+                (typeof b.team === "object" && b.team !== null ? (b.team as { id?: unknown }).id : undefined) ??
+                b.team_id;
+            const user = typeof b.user === "object" && b.user !== null ? (b.user as { id?: unknown }).id : b.user;
+            console.log(
+                `[SlackDiag] type=${String(b.type ?? "?")} callback=${String(b.callback_id ?? "-")} ` +
+                    `team=${String(team ?? "?")} user=${String(user ?? "?")} app=${String(b.api_app_id ?? "?")}`,
+            );
+        } catch {
+            // Diagnostic must never break event flow.
+        }
+        await next();
+    });
+
     // ---- Slack Handlers (no business logic; delegates to Trigger Layer) ----
     registerSlackHandlers(bolt, {
         registry: triggerRegistry,
         factory: triggerFactory,
         dispatcher: triggerDispatcher,
+        investigationService,
+        intentDetector,
+        questionService,
+        cardService,
     });
 
     console.log("✓ Slack Handlers Registered");
+
+    // =====================================================================
+    // Incident Coordination Layer (deterministic, no AI)
+    // =====================================================================
+    await IncidentModel.ensureIndexes().catch((e) => console.warn("Incident index ensure failed:", e));
+    await SlackProcessedEventModel.ensureIndexes().catch((e) => console.warn("Processed-event index ensure failed:", e));
+    await AuditLogModel.ensureIndexes().catch((e) => console.warn("Audit index ensure failed:", e));
+
+    const incidentRepo = new MongoIncidentRepository();
+    const idempotencyStore = new MongoIdempotencyStore();
+    const membership = new DefaultMembershipResolver(
+        (process.env.INCIDENT_OWNERS ?? "").split(",").map((s) => s.trim()).filter(Boolean),
+        (process.env.INCIDENT_ADMINS ?? "").split(",").map((s) => s.trim()).filter(Boolean),
+    );
+    const incidentBus = new IncidentBus();
+    const coordinator = new IncidentCoordinator(incidentRepo, incidentBus, idempotencyStore, membership);
+
+    const incidentGateway = new SlackGateway(idempotencyStore);
+
+    // Per-workspace authorized Slack clients. bolt.client at startup carries
+    // no token under Socket Mode (custom authorize), so background and
+    // event-driven code must resolve team clients here (not_authed otherwise).
+    const slackClients = createSlackClientProvider({
+        lookup: installationLookup,
+        decrypt: decryptToken,
+    });
+
+    incidentBus.subscribe("*", new IncidentAuditHandler());
+    incidentBus.subscribe("*", new IncidentNotifier(coordinator, slackClients));
+
+    registerIncidentSlackHandlers(bolt, {
+        coordinator,
+        gateway: incidentGateway,
+        membership,
+    });
+
+    app.use("/api/incidents", createIncidentsRouter({ coordinator }));
+
+    console.log("✓ Incident Coordination Layer Initialized");
 
     // =====================================================================
     // GitHub Webhook (hotfix PR runbooks - standalone legacy flow)
@@ -259,6 +398,12 @@ const start = async () => {
         const event = req.headers["x-github-event"];
         console.log(`📦 GitHub event received: ${event}`);
 
+        if (!githubEnabled) {
+            console.log("GitHub flow disabled (no GITHUB_TOKEN) — skipping");
+            res.status(200).send("OK");
+            return;
+        }
+
         if (event === "issue_comment" && payload.action === "created") {
             const commentBody = payload.comment?.body?.trim().toLowerCase();
             const commenter = payload.comment?.user?.login;
@@ -279,7 +424,7 @@ const start = async () => {
             res.status(200).send("OK");
 
             try {
-                const comments = await octokit.issues.listComments({
+                const comments = await getOctokit().issues.listComments({
                     owner: repoOwner,
                     repo: repoName,
                     issue_number: prNumber,
@@ -413,8 +558,16 @@ const start = async () => {
 
     console.log("✓ GitHub Webhook Registered");
 
+    if (useSocketMode) {
+        // SocketModeReceiver only opens its WebSocket on start() — without
+        // this, boot logs look fine but no Slack events ever arrive.
+        await bolt.start();
+        console.log("✓ Slack Socket Mode connected");
+    }
+
     app.listen(PORT, () => {
-        console.log(`✓ Server Listening on port ${PORT}`);
+        console.log(`✓ Server Listening on port ${PORT} → http://localhost:${PORT}`);
+        console.log(`✓ Health check: http://localhost:${PORT}/healthz`);
     });
 };
 

@@ -258,6 +258,80 @@ describe("TriggerDispatcher", () => {
     expect(callArgs.metadata.triggerType).toBe("slash_command");
     expect(callArgs.metadata.customField).toBe("customValue");
   });
+
+  it("calls createOrAssociateInvestigation when associate is requested", async () => {
+    const service = createMockInvestigationService() as any;
+    service.createOrAssociateInvestigation = vi.fn(async () => ({
+      kind: "created",
+      investigation: { id: "inv-associated", status: "draft" },
+    }));
+    const dispatcher = new TriggerDispatcher(service);
+    const trigger = Trigger.create({
+      source: TriggerSource.Slack,
+      type: TriggerType.Mention,
+      actor: "U12345",
+      payload: { channel: "C12345", teamId: "T12345", threadTs: "" },
+      metadata: { slackChannelId: "C12345", slackTeamId: "T12345" },
+    });
+
+    const result = await dispatcher.dispatch(trigger, { associate: true });
+
+    expect(service.createOrAssociateInvestigation).toHaveBeenCalledTimes(1);
+    expect(service.createInvestigation).not.toHaveBeenCalled();
+    expect(result.associated).toBe(false);
+    expect(result.association).toBe("created");
+    expect(result.investigationId).toBe("inv-associated");
+  });
+
+  it("maps a reused acquisition into an associated result", async () => {
+    const service = createMockInvestigationService() as any;
+    service.createOrAssociateInvestigation = vi.fn(async () => ({
+      kind: "reused",
+      association: "channel",
+      investigation: { id: "inv-reused", status: "collecting_evidence" },
+    }));
+    const dispatcher = new TriggerDispatcher(service);
+    const trigger = Trigger.create({
+      source: TriggerSource.Slack,
+      type: TriggerType.Mention,
+      actor: "U12345",
+      payload: { channel: "C12345", teamId: "T12345" },
+    });
+
+    const result = await dispatcher.dispatch(trigger, { associate: true });
+
+    expect(result.associated).toBe(true);
+    expect(result.association).toBe("channel");
+    expect(result.investigationId).toBe("inv-reused");
+    expect(result.candidates).toBeUndefined();
+  });
+
+  it("maps multiple candidates to a choose result", async () => {
+    const service = createMockInvestigationService() as any;
+    service.createOrAssociateInvestigation = vi.fn(async () => ({
+      kind: "needs_choice",
+      candidates: [
+        { id: "inv-1", title: "A", status: "draft" },
+        { id: "inv-2", title: "B", status: "draft" },
+      ],
+    }));
+    const dispatcher = new TriggerDispatcher(service);
+    const trigger = Trigger.create({
+      type: TriggerType.Mention,
+      source: TriggerSource.Slack,
+      actor: "U12345",
+      payload: { channel: "C12345", teamId: "T12345" },
+    });
+
+    const result = await dispatcher.dispatch(trigger, { associate: true });
+
+    expect(result.success).toBe(true);
+    expect(result.associated).toBe(false);
+    expect(result.association).toBe("multiple");
+    expect(result.candidates).toHaveLength(2);
+    expect(result.candidates?.[0].investigationId).toBe("inv-1");
+    expect(result.candidates?.[1].investigationId).toBe("inv-2");
+  });
 });
 
 describe("TriggerRegistry", () => {

@@ -9,7 +9,7 @@ export default defineConfig({
     coverage: {
       provider: "v8",
       reporter: ["text", "json", "html"],
-      include: ["domains/**/*.ts", "infrastructure/**/*.ts", "handlers/**/*.ts"],
+      include: ["domains/**/*.ts", "infrastructure/**/*.ts", "handlers/**/*.ts", "slack/**/*.ts", "api/**/*.ts", "observability/**/*.ts"],
       exclude: ["**/*.test.ts", "**/*.d.ts"],
     },
   },

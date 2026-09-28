@@ -19,6 +19,23 @@ export interface TriggerDispatchResult {
   readonly triggerType: string;
   readonly success: boolean;
   readonly error?: string;
+  /** True when an existing investigation was reused instead of created. */
+  readonly associated?: boolean;
+  /** How the investigation was resolved for this trigger. */
+  readonly association?: "thread" | "channel" | "recent_user" | "created" | "multiple";
+  /** Candidate investigations when the user must choose (association = "multiple"). */
+  readonly candidates?: readonly CandidateInvestigation[];
+}
+
+/**
+ * A lightweight candidate investigation shown to the user when association
+ * cannot be guessed (multiple matches). Contains no secrets.
+ */
+export interface CandidateInvestigation {
+  readonly investigationId: InvestigationId;
+  readonly title: string;
+  readonly status: string;
+  readonly createdAt: Date;
 }
 
 /**

@@ -1,6 +1,7 @@
 import { TimelineEventModel, type ITimelineEventDoc } from "../models/InvestigationTimeline.model.js";
 import type { InvestigationId } from "../domains/investigation/types.js";
 import { TimelineEvent, type TimelineEventProps } from "../domains/investigation/TimelineEvent.js";
+import type { ITimelineRepository } from "../domains/investigation/TimelineService.js";
 
 function toDomain(doc: ITimelineEventDoc): TimelineEvent {
   return TimelineEvent.reconstitute({
@@ -11,12 +12,6 @@ function toDomain(doc: ITimelineEventDoc): TimelineEvent {
     timestamp: doc.timestamp,
     metadata: doc.metadata,
   });
-}
-
-export interface ITimelineRepository {
-  create(event: TimelineEvent): Promise<void>;
-  findByInvestigationId(investigationId: InvestigationId): Promise<TimelineEvent[]>;
-  findIdsByInvestigationId(investigationId: InvestigationId): Promise<string[]>;
 }
 
 export class MongoTimelineRepository implements ITimelineRepository {
@@ -35,10 +30,5 @@ export class MongoTimelineRepository implements ITimelineRepository {
   async findByInvestigationId(investigationId: InvestigationId): Promise<TimelineEvent[]> {
     const docs = await TimelineEventModel.find({ investigationId }).sort({ timestamp: 1 });
     return docs.map(toDomain);
-  }
-
-  async findIdsByInvestigationId(investigationId: InvestigationId): Promise<string[]> {
-    const docs = await TimelineEventModel.find({ investigationId }).select("_id");
-    return docs.map((d) => d._id);
   }
 }
