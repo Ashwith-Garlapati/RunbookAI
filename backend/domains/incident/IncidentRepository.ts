@@ -20,6 +20,28 @@ export interface IIncidentRepository {
   linkIdempotencyKey?(incidentId: IncidentId, key: IdempotencyKey): Promise<void>;
 }
 
+/**
+ * Thrown when a conditional versioned write matches nothing: another writer
+ * committed a newer version first. Never leaks partial state — the caller's
+ * in-memory aggregate is discarded and the operation may retry on fresh data.
+ */
+export class IncidentVersionConflictError extends Error {
+  readonly incidentId: IncidentId;
+  readonly expectedVersion: number;
+  readonly currentVersion: number | null;
+
+  constructor(incidentId: IncidentId, expectedVersion: number, currentVersion: number | null = null) {
+    super(
+      `Version conflict on incident ${incidentId}: expected version ${expectedVersion}` +
+        (currentVersion === null ? "" : `, current is ${currentVersion}`),
+    );
+    this.name = "IncidentVersionConflictError";
+    this.incidentId = incidentId;
+    this.expectedVersion = expectedVersion;
+    this.currentVersion = currentVersion;
+  }
+}
+
 /** Idempotency record for Slack deliveries and mutating UI actions. */
 export interface IIdempotencyStore {
   /**
@@ -53,7 +75,7 @@ export class DefaultMembershipResolver implements IMembershipResolver {
     if (this._owners.has(key) || this._owners.has(slackUserId)) return MembershipLevel.Owner;
     if (this._admins.has(key) || this._admins.has(slackUserId)) return MembershipLevel.Admin;
     if (incident) {
-      if (incident.currentRoles[IncidentRole.IncidentLead] === slackUserId) {
+      if (incident.currentRoles[IncidentRole.IncidentCommander] === slackUserId) {
         return MembershipLevel.Commander;
       }
       if (incident.participants.some((p) => p.userId === slackUserId)) {

@@ -6,6 +6,9 @@ export interface IInstallation extends Document {
     botToken: string;
     botUserId: string;
     botId?: string;
+    defaultCommanderId?: string;
+    /** Legacy name for defaultCommanderId — still read, no longer written. */
+    defaultLeadId?: string;
     githubOrgs: string[];
     installedAt: Date;
 }
@@ -27,6 +30,12 @@ const installationSchema = new Schema<IInstallation>({
         type: String,
     },
     botId: {
+        type: String,
+    },
+    defaultCommanderId: {
+        type: String,
+    },
+    defaultLeadId: {
         type: String,
     },
     githubOrgs: {

@@ -72,29 +72,18 @@ describe("Slack Slash Command Trigger Integration", () => {
     expect(service.createInvestigation).toHaveBeenCalled();
   });
 
-  it("processes /runbook start command successfully", async () => {
+  it("rejects /runbook command (removed — use /investigate)", async () => {
     const rawEvent = {
       command: "/runbook",
       text: "start database connection issues",
       user_id: "U12345",
-      user_name: "john.doe",
       channel_id: "C12345",
-      channel_name: "incidents",
-      team_id: "T12345",
-      trigger_id: "1234567890.123456",
-      api_app_id: "A12345",
-      token: "verification_token",
-      response_url: "https://hooks.slack.com/actions/123",
     };
 
     const adapter = registry.findAdapter(TriggerSource.Slack, TriggerType.SlashCommand);
-    const trigger = factory.create(adapter!, rawEvent);
+    const trigger = adapter?.adapt(rawEvent);
 
-    expect(trigger.type).toBe(TriggerType.SlashCommand);
-    expect(trigger.payload.text).toBe("start database connection issues");
-
-    const result = await dispatcher.dispatch(trigger);
-    expect(result.success).toBe(true);
+    expect(trigger).toBeNull();
   });
 
   it("rejects /runbook command without 'start'", async () => {

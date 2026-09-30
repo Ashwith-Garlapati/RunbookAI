@@ -50,7 +50,10 @@ export interface RoleAssignment {
   readonly actor: SlackUserId;
   readonly at: Date;
   readonly action: "assigned" | "reassigned" | "unassigned";
+  acknowledgedAt: Date | null;
 }
+
+export type AssignmentState = "vacant" | "pending_ack" | "active";
 
 export interface Participant {
   readonly userId: SlackUserId;
@@ -62,10 +65,7 @@ export interface IncidentUpdate {
   readonly id: UpdateId;
   readonly author: SlackUserId;
   readonly at: Date;
-  readonly situation: string;
-  readonly changed: string;
-  readonly impact: string;
-  readonly nextStep: string;
+  readonly text: string;
 }
 
 export interface IncidentAction {
@@ -194,9 +194,13 @@ export interface IncidentProps {
   resolution: ResolutionPacket | null;
   cancelInfo: CancelInfo | null;
   closeInfo: CloseInfo | null;
+  nextUpdateAt: Date | null;
+  nextUpdateFor: SlackUserId | null;
   investigationId: string | null;
   readonly createdAt: Date;
   updatedAt: Date;
+  /** Optimistic-concurrency revision. Starts at 1; every persisted mutation advances it. */
+  version: number;
 }
 
 export interface DeclareIncidentParams {
@@ -211,6 +215,8 @@ export interface DeclareIncidentParams {
   readonly originChannelId?: SlackChannelId | null;
   readonly originMessageTs?: MessageTs | null;
   readonly idempotencyKey?: string;
+  /** Provisional commander assigned atomically at declare time (system/config-driven). */
+  readonly defaultCommanderId?: SlackUserId;
 }
 
 export class Incident {
@@ -249,8 +255,11 @@ export class Incident {
   resolution: ResolutionPacket | null;
   cancelInfo: CancelInfo | null;
   closeInfo: CloseInfo | null;
+  nextUpdateAt: Date | null;
+  nextUpdateFor: SlackUserId | null;
   investigationId: string | null;
   updatedAt: Date;
+  version: number;
 
   private constructor(props: IncidentProps) {
     this.id = props.id;
@@ -285,8 +294,11 @@ export class Incident {
     this.resolution = props.resolution;
     this.cancelInfo = props.cancelInfo;
     this.closeInfo = props.closeInfo;
+    this.nextUpdateAt = props.nextUpdateAt;
+    this.nextUpdateFor = props.nextUpdateFor;
     this.investigationId = props.investigationId;
     this.updatedAt = props.updatedAt;
+    this.version = props.version;
   }
 
   static declare(params: DeclareIncidentParams): Incident {
@@ -325,9 +337,12 @@ export class Incident {
       resolution: null,
       cancelInfo: null,
       closeInfo: null,
+      nextUpdateAt: null,
+      nextUpdateFor: null,
       investigationId: null,
       createdAt: now,
       updatedAt: now,
+      version: 1,
     });
     incident.addTimeline(IncidentTimelineType.Declared, params.reporterId, `Incident declared: ${title}`, {
       severity: incident.severity,
@@ -376,9 +391,12 @@ export class Incident {
       resolution: this.resolution,
       cancelInfo: this.cancelInfo,
       closeInfo: this.closeInfo,
+      nextUpdateAt: this.nextUpdateAt,
+      nextUpdateFor: this.nextUpdateFor,
       investigationId: this.investigationId,
       createdAt: this.createdAt,
       updatedAt: this.updatedAt,
+      version: this.version,
     };
   }
 
@@ -404,6 +422,33 @@ export class Incident {
   setControlMessage(ts: MessageTs): void {
     this.controlMessageTs = ts;
     this.touch();
+  }
+
+  /**
+   * Moves coordination to another channel (`/inc link`). Unlike
+   * attachChannel, this explicitly replaces an existing mapping and records
+   * the move on the timeline. The old channel's control message goes stale
+   * (it is never rewritten — history is preserved).
+   */
+  relinkChannel(actor: SlackUserId, channelId: SlackChannelId, channelName: string): void {
+    const previous = this.channelId;
+    if (previous === channelId) return;
+    this.channelId = channelId;
+    this.channelName = channelName;
+    this.channelPermalink = null;
+    this.controlMessageTs = null;
+    this.ensureParticipant(actor, "interacted");
+    this.touch();
+    this.addTimeline(IncidentTimelineType.ChannelLinked, actor, `Coordination moved to <#${channelId}>`, {
+      previous,
+      channelId,
+      channelName,
+    });
+    this.addActivity(actor, "channel_linked", `Channel ${previous ?? "none"} → ${channelId}`, {
+      previous,
+      channelId,
+    });
+    this.emit("incident.channel_linked", actor, { previous, channelId, channelName });
   }
 
   // ---------- rename ----------
@@ -457,7 +502,7 @@ export class Incident {
     const action = current === null ? "assigned" : current === assignee ? "assigned" : "reassigned";
     if (current === assignee) return;
     this.currentRoles[role] = assignee;
-    this.roleHistory.push({ id: randomUUID(), role, assignee, actor, at: new Date(), action });
+    this.roleHistory.push({ id: randomUUID(), role, assignee, actor, at: new Date(), action, acknowledgedAt: null });
     this.ensureParticipant(assignee, "role_assigned");
     this.touch();
     const type =
@@ -475,7 +520,7 @@ export class Incident {
     const current = this.currentRoles[role] ?? null;
     if (current === null) return;
     this.currentRoles[role] = null;
-    this.roleHistory.push({ id: randomUUID(), role, assignee: null, actor, at: new Date(), action: "unassigned" });
+    this.roleHistory.push({ id: randomUUID(), role, assignee: null, actor, at: new Date(), action: "unassigned", acknowledgedAt: null });
     this.touch();
     this.addTimeline(IncidentTimelineType.RoleUnassigned, actor, `${role} unassigned (was <@${current}>)`, {
       role,
@@ -483,6 +528,49 @@ export class Incident {
     });
     this.addActivity(actor, "role_unassigned", `${role} unassigned`, { role, previous: current });
     this.emit("incident.role_unassigned", actor, { role, previous: current });
+  }
+
+  /**
+   * Marks the current assignee's latest assignment acknowledged.
+   * Returns true when the state changed, false when already acknowledged
+   * (idempotent — repeated Accept clicks are safe).
+   */
+  acknowledgeRole(actor: SlackUserId, role: IncidentRole): boolean {
+    const current = this.currentRoles[role] ?? null;
+    if (!current) throw new Error(`No assignee for role ${role}`);
+    const latest = [...this.roleHistory].reverse().find((h) => h.role === role && h.assignee);
+    if (latest?.acknowledgedAt) return false;
+    if (latest) {
+      latest.acknowledgedAt = new Date();
+    } else {
+      // Legacy rows without history entries: record assignment + ack together.
+      this.roleHistory.push({
+        id: randomUUID(),
+        role,
+        assignee: current,
+        actor,
+        at: new Date(),
+        action: "assigned",
+        acknowledgedAt: new Date(),
+      });
+    }
+    this.touch();
+    this.addTimeline(IncidentTimelineType.RoleAcknowledged, actor, `<@${current}> accepted ${role}`, {
+      role,
+      assignee: current,
+    });
+    this.addActivity(actor, "role_acknowledged", `${role} accepted by ${current}`, { role, assignee: current });
+    this.emit("incident.role_acknowledged", actor, { role, assignee: current });
+    return true;
+  }
+
+  /** vacant = nobody assigned; pending_ack = assigned but not accepted; active = accepted. */
+  assignmentState(role: IncidentRole): AssignmentState {
+    const current = this.currentRoles[role] ?? null;
+    if (!current) return "vacant";
+    const latest = [...this.roleHistory].reverse().find((h) => h.role === role && h.assignee);
+    if (latest && !latest.acknowledgedAt) return "pending_ack";
+    return "active";
   }
 
   // ---------- participants ----------
@@ -507,29 +595,43 @@ export class Incident {
 
   postUpdate(
     author: SlackUserId,
-    fields: { situation: string; changed: string; impact: string; nextStep: string },
+    fields: { text: string; nextUpdateInMinutes?: number | null },
   ): IncidentUpdate {
-    for (const [k, v] of Object.entries(fields)) {
-      if (!v || !v.trim()) throw new Error(`Update field "${k}" is required`);
-    }
-    const update: IncidentUpdate = {
-      id: randomUUID(),
-      author,
-      at: new Date(),
-      situation: fields.situation.slice(0, 2000),
-      changed: fields.changed.slice(0, 2000),
-      impact: fields.impact.slice(0, 2000),
-      nextStep: fields.nextStep.slice(0, 2000),
-    };
+    const text = (fields.text ?? "").trim().slice(0, 4000);
+    if (!text) throw new Error('Update field "text" is required');
+    const minutes =
+      typeof fields.nextUpdateInMinutes === "number" && Number.isFinite(fields.nextUpdateInMinutes)
+        ? Math.max(1, Math.min(24 * 60, Math.floor(fields.nextUpdateInMinutes)))
+        : null;
+    const update: IncidentUpdate = { id: randomUUID(), author, at: new Date(), text };
     this.updates.push(update);
     this.ensureParticipant(author, "interacted");
+    // Posting an update supersedes any pending reminder; a new duration
+    // schedules the next one.
+    this.nextUpdateAt = minutes !== null ? new Date(Date.now() + minutes * 60_000) : null;
+    this.nextUpdateFor = minutes !== null ? author : null;
     this.touch();
     this.addTimeline(IncidentTimelineType.UpdatePosted, author, `Update posted by <@${author}>`, {
       updateId: update.id,
+      ...(minutes !== null ? { nextUpdateInMinutes: minutes } : {}),
     });
     this.addActivity(author, "update_posted", `Update ${update.id}`, { updateId: update.id });
     this.emit("incident.update_posted", author, { updateId: update.id });
     return update;
+  }
+
+  /**
+   * Fires a due update reminder. Clears the schedule so each reminder fires
+   * once; returns false when nothing is due (idempotent for repeat sweeps).
+   */
+  markReminderSent(now = new Date()): boolean {
+    if (!this.nextUpdateAt || this.nextUpdateAt.getTime() > now.getTime()) return false;
+    this.nextUpdateAt = null;
+    const forUser = this.nextUpdateFor;
+    this.nextUpdateFor = null;
+    this.touch();
+    this.addActivity(forUser ?? "system", "update_reminder_sent", "Update reminder sent", {});
+    return true;
   }
 
   // ---------- actions ----------
@@ -688,24 +790,25 @@ export class Incident {
   }
 
   handover(actor: SlackUserId, newCommander: SlackUserId): void {
-    const previous = this.currentRoles[IncidentRole.IncidentLead] ?? null;
+    const previous = this.currentRoles[IncidentRole.IncidentCommander] ?? null;
     if (previous === newCommander) return;
-    this.currentRoles[IncidentRole.IncidentLead] = newCommander;
+    this.currentRoles[IncidentRole.IncidentCommander] = newCommander;
     this.roleHistory.push({
       id: randomUUID(),
-      role: IncidentRole.IncidentLead,
+      role: IncidentRole.IncidentCommander,
       assignee: newCommander,
       actor,
       at: new Date(),
       action: previous === null ? "assigned" : "reassigned",
+      acknowledgedAt: null,
     });
     this.ensureParticipant(newCommander, "role_assigned");
     this.touch();
-    this.addTimeline(IncidentTimelineType.HandoverCompleted, actor, `Lead handed over to <@${newCommander}>`, {
+    this.addTimeline(IncidentTimelineType.HandoverCompleted, actor, `Incident Commander handed over to <@${newCommander}>`, {
       previous,
       newCommander,
     });
-    this.addActivity(actor, "handover", `Lead ${previous ?? "vacant"} → ${newCommander}`, {
+    this.addActivity(actor, "handover", `Commander ${previous ?? "vacant"} → ${newCommander}`, {
       previous,
       newCommander,
     });

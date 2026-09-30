@@ -19,6 +19,7 @@ const RoleAssignmentSchema = new Schema(
     actor: String,
     at: Date,
     action: String,
+    acknowledgedAt: { type: Date, default: null },
   },
   { _id: false },
 );
@@ -37,10 +38,7 @@ const UpdateSchema = new Schema(
     id: String,
     author: String,
     at: Date,
-    situation: String,
-    changed: String,
-    impact: String,
-    nextStep: String,
+    text: String,
   },
   { _id: false },
 );
@@ -168,10 +166,13 @@ const IncidentSchema = new Schema(
     resolution: { type: Mixed, default: null },
     cancelInfo: { type: Mixed, default: null },
     closeInfo: { type: Mixed, default: null },
+    nextUpdateAt: { type: Date, default: null },
+    nextUpdateFor: { type: String, default: null },
     investigationId: { type: String, default: null },
     idempotencyKey: { type: String, default: null },
     createdAt: { type: Date, required: true },
     updatedAt: { type: Date, required: true },
+    version: { type: Number, required: true, default: 1 },
   },
   { _id: false, timestamps: false },
 );
@@ -180,5 +181,6 @@ IncidentSchema.index({ teamId: 1, status: 1 });
 IncidentSchema.index({ teamId: 1, channelId: 1 }, { sparse: true });
 IncidentSchema.index({ teamId: 1, createdAt: -1 });
 IncidentSchema.index({ teamId: 1, idempotencyKey: 1 }, { sparse: true });
+IncidentSchema.index({ teamId: 1, status: 1, nextUpdateAt: 1 }, { sparse: true });
 
 export const IncidentModel = mongoose.model("Incident", IncidentSchema);

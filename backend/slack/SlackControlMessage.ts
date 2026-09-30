@@ -14,13 +14,13 @@ import { incidentStatusLabel } from "../domains/incident/IncidentStatus.js";
 export const CONTROL_ACTIONS = {
   update: "inc_update",
   status: "inc_status",
-  severity: "inc_severity",
   roles: "inc_roles",
   actions: "inc_actions",
   followups: "inc_followups",
   timeline: "inc_timeline",
   escalate: "inc_escalate",
   handover: "inc_handover",
+  accept: "inc_accept",
   resolve: "inc_resolve",
   cancel: "inc_cancel",
   close: "inc_close",
@@ -38,6 +38,11 @@ export function controlMessageText(incident: Incident): string {
 export function buildControlBlocks(incident: Incident): unknown[] {
   const openActions = incident.openActions().length;
   const openFollowUps = incident.openFollowUps().length;
+  const commanderId = incident.currentRoles[IncidentRole.IncidentCommander] ?? null;
+  const commanderState = incident.assignmentState(IncidentRole.IncidentCommander);
+  const commanderLine =
+    commanderId === null ? "_vacant_" : commanderState === "active" ? `<@${commanderId}> ✓` : `<@${commanderId}> (pending ack)`;
+  const showAccept = commanderId !== null && commanderState === "pending_ack";
   return [
     { type: "header", text: { type: "plain_text", text: `🚨 ${incident.title.slice(0, 140)}`, emoji: true } },
     {
@@ -45,7 +50,7 @@ export function buildControlBlocks(incident: Incident): unknown[] {
       fields: [
         { type: "mrkdwn", text: `*Severity:*\n${severityLabel(incident.severity)}` },
         { type: "mrkdwn", text: `*Status:*\n${incidentStatusLabel(incident.status)}` },
-        { type: "mrkdwn", text: `*Lead:*\n${incident.currentRoles.incident_lead ? `<@${incident.currentRoles.incident_lead}>` : "_vacant_"}` },
+        { type: "mrkdwn", text: `*Commander:*\n${commanderLine}` },
         { type: "mrkdwn", text: `*Actions:*\n${openActions} open · ${openFollowUps} follow-ups` },
       ],
     },
@@ -54,7 +59,7 @@ export function buildControlBlocks(incident: Incident): unknown[] {
       text: {
         type: "mrkdwn",
         text: [
-          roleLine(incident, IncidentRole.IncidentLead),
+          roleLine(incident, IncidentRole.IncidentCommander),
           `Started: <!date^${Math.floor(incident.createdAt.getTime() / 1000)}^{date_short} {time}|started>`,
         ].join("\n"),
       },
@@ -65,7 +70,6 @@ export function buildControlBlocks(incident: Incident): unknown[] {
       elements: [
         { type: "button", text: { type: "plain_text", text: "Update", emoji: true }, action_id: CONTROL_ACTIONS.update, value: incident.id },
         { type: "button", text: { type: "plain_text", text: "Status", emoji: true }, action_id: CONTROL_ACTIONS.status, value: incident.id },
-        { type: "button", text: { type: "plain_text", text: "Severity", emoji: true }, action_id: CONTROL_ACTIONS.severity, value: incident.id },
         { type: "button", text: { type: "plain_text", text: "Roles", emoji: true }, action_id: CONTROL_ACTIONS.roles, value: incident.id },
         { type: "button", text: { type: "plain_text", text: "Actions", emoji: true }, action_id: CONTROL_ACTIONS.actions, value: incident.id },
       ],
@@ -85,25 +89,29 @@ export function buildControlBlocks(incident: Incident): unknown[] {
         },
       ],
     },
+    ...(showAccept
+      ? [
+          {
+            type: "actions",
+            elements: [
+              {
+                type: "button",
+                text: { type: "plain_text", text: "Accept", emoji: true },
+                style: "primary",
+                action_id: CONTROL_ACTIONS.accept,
+                value: incident.id,
+              },
+            ],
+          },
+        ]
+      : []),
   ];
 }
 
-export function buildUpdateBlocks(params: {
-  author: string;
-  situation: string;
-  changed: string;
-  impact: string;
-  nextStep: string;
-}): unknown[] {
+export function buildUpdateBlocks(params: { author: string; text: string }): unknown[] {
   return [
     { type: "section", text: { type: "mrkdwn", text: `📣 *Incident update* from <@${params.author}>` } },
-    {
-      type: "section",
-      text: {
-        type: "mrkdwn",
-        text: `*Situation:*\n${params.situation}\n*What changed:*\n${params.changed}\n*Impact:*\n${params.impact}\n*Next step:*\n${params.nextStep}`,
-      },
-    },
+    { type: "section", text: { type: "mrkdwn", text: params.text } },
   ];
 }
 
@@ -119,18 +127,31 @@ export function buildTimelineBlocks(entries: Array<{ type: string; at: Date; sum
 
 /** Read-only incident details for `/inc status` and the Status button. No mutations. */
 export function buildIncidentDetailsBlocks(incident: Incident): unknown[] {
-  const roles = [incident.currentRoles.incident_lead ? `Lead: <@${incident.currentRoles.incident_lead}>` : null]
+  const commanderId = incident.currentRoles[IncidentRole.IncidentCommander] ?? null;
+  const commanderState = incident.assignmentState(IncidentRole.IncidentCommander);
+  const roles = [
+    commanderId === null
+      ? null
+      : `Commander: <@${commanderId}>${commanderState === "active" ? " ✓ Accepted" : " (awaiting acknowledgement)"}`,
+  ]
     .filter(Boolean)
     .join(" · ");
+  const resolutionLine = incident.resolution
+    ? `Resolved by <@${incident.resolution.resolvedBy}> on <!date^${Math.floor(incident.resolution.resolvedAt.getTime() / 1000)}^{date_short} {time}|resolved>`
+    : null;
+  const lines = [
+    roles || "No roles assigned yet",
+    resolutionLine,
+  ].filter(Boolean) as string[];
   return [
     { type: "header", text: { type: "plain_text", text: `📋 ${incident.title.slice(0, 140)}`, emoji: true } },
     {
       type: "section",
       fields: [
-        { type: "mrkdwn", text: `*Severity:*\n${severityLabel(incident.severity)}` },
-        { type: "mrkdwn", text: `*Status:*\n${incidentStatusLabel(incident.status)}` },
-        { type: "mrkdwn", text: `*Reporter:*\n<@${incident.reporterId}>` },
-        { type: "mrkdwn", text: `*Channel:*\n${incident.channelId ? `<#${incident.channelId}>` : "_none_"}` },
+        { type: "mrkdwn", text: `*Severity:* ${severityLabel(incident.severity)}` },
+        { type: "mrkdwn", text: `*Status:* ${incidentStatusLabel(incident.status)}` },
+        { type: "mrkdwn", text: `*Reporter:* <@${incident.reporterId}>` },
+        { type: "mrkdwn", text: `*Channel:* ${incident.channelId ? `<#${incident.channelId}>` : "_none_"}` },
       ],
     },
     {
@@ -138,7 +159,7 @@ export function buildIncidentDetailsBlocks(incident: Incident): unknown[] {
       text: {
         type: "mrkdwn",
         text: [
-          roles || "No roles assigned yet",
+          ...lines,
           `Actions open: ${incident.openActions().length} · Follow-ups open: ${incident.openFollowUps().length} · Updates: ${incident.updates.length}`,
           `Service: ${incident.affectedService || "_unspecified_"}`,
           `Started: <!date^${Math.floor(incident.createdAt.getTime() / 1000)}^{date_short} {time}|started>`,

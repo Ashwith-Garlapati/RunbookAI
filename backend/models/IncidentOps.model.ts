@@ -35,3 +35,31 @@ const AuditLogSchema = new Schema(
 AuditLogSchema.index({ teamId: 1, incidentId: 1, at: 1 });
 
 export const AuditLogModel = mongoose.model("AuditLog", AuditLogSchema);
+
+/**
+ * Durable incident job queue. One document per job key (`_id` unique =
+ * idempotency across restarts). Jobs are dispatched by op with serializable
+ * params only — never closures. Terminal rows age out via TTL.
+ */
+export type IncidentJobStatus = "pending" | "inflight" | "done" | "failed";
+
+const IncidentJobSchema = new Schema(
+  {
+    _id: { type: String, required: true },
+    teamId: { type: String, required: true },
+    op: { type: String, required: true },
+    params: { type: Schema.Types.Mixed, default: {} },
+    status: { type: String, required: true, default: "pending" },
+    attempts: { type: Number, required: true, default: 0 },
+    notBefore: { type: Date, required: true, default: () => new Date() },
+    leaseExpires: { type: Date, default: null },
+    error: { type: String, default: null },
+  },
+  { _id: false, timestamps: true },
+);
+
+IncidentJobSchema.index({ status: 1, notBefore: 1, createdAt: 1 });
+IncidentJobSchema.index({ status: 1, leaseExpires: 1 });
+IncidentJobSchema.index({ updatedAt: 1 }, { expireAfterSeconds: 60 * 60 * 24 * 7 });
+
+export const IncidentJobModel = mongoose.model("IncidentJob", IncidentJobSchema);

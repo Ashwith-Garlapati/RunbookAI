@@ -6,20 +6,20 @@
  */
 
 export enum IncidentRole {
-  IncidentLead = "incident_lead",
+  IncidentCommander = "incident_commander",
 }
 
-export const INCIDENT_ROLES: readonly IncidentRole[] = [IncidentRole.IncidentLead];
+export const INCIDENT_ROLES: readonly IncidentRole[] = [IncidentRole.IncidentCommander];
 
 export const ROLE_LABELS: Readonly<Record<IncidentRole, string>> = {
-  [IncidentRole.IncidentLead]: "Incident Lead",
+  [IncidentRole.IncidentCommander]: "Incident Commander",
 };
 
 export function parseRole(input: unknown): IncidentRole | undefined {
   if (typeof input !== "string") return undefined;
   const v = input.trim().toLowerCase().replace(/[_\s-]/g, "");
-  if (["incidentlead", "lead", "incidentcommander", "commander", "ic"].includes(v))
-    return IncidentRole.IncidentLead;
+  if (["incidentcommander", "commander", "ic", "incidentlead", "lead"].includes(v))
+    return IncidentRole.IncidentCommander;
   return undefined;
 }
 

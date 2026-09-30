@@ -41,7 +41,6 @@ import { SlackMentionAdapter } from "./domains/trigger/adapters/SlackMentionAdap
 import { registerSlackHandlers } from "./handlers/SlackHandlers.js";
 import { MentionIntentDetector } from "./services/MentionIntentDetector.js";
 import { QuestionAnsweringService } from "./services/QuestionAnsweringService.js";
-import { SlackIncidentCardService } from "./services/SlackIncidentCardService.js";
 import { SlackCardHandler } from "./handlers/SlackCardHandler.js";
 
 // Incident Coordination Layer (deterministic, no AI)
@@ -54,6 +53,11 @@ import { registerIncidentSlackHandlers } from "./slack/IncidentSlackHandlers.js"
 import { IncidentAuditHandler, IncidentNotifier } from "./handlers/IncidentTimelineHandler.js";
 import { createSlackClientProvider } from "./slack/slackClientProvider.js";
 import { createIncidentsRouter } from "./api/incidents.routes.js";
+import { createTeamConfigRouter } from "./api/teamConfig.routes.js";
+import { MongoJobStore } from "./infrastructure/MongoJobStore.js";
+import { IncidentJobModel } from "./models/IncidentOps.model.js";
+import { runIncidentJob, type IncidentJobOp } from "./slack/incidentJobs.js";
+import { startUpdateReminderLoop } from "./slack/updateReminder.js";
 import { encryptToken, decryptToken } from "./slack/tokenCrypto.js";
 import { createSlackAuthorize } from "./slack/slackAuthorize.js";
 import { IncidentModel } from "./models/Incident.model.js";
@@ -234,11 +238,9 @@ const bolt = useSocketMode
 // before invoking the AI Investigation Engine (services/aiEngine.ts).
 // Those services are intentionally NOT called from the trigger flow.
 //
-// TODO(Runbook Phase): Runbook generation, approval DMs, and the legacy
-// incident-tracking flows (services/slackChannelManager.ts,
-// services/slackModal.ts, approve/reject actions, /runbook search,
-// /runbook github-link, /runbook resolve) belong to later phases and are
-// not registered here.
+// TODO(Runbook Phase): Runbook generation, approval DMs, and runbook
+// search / github-link / resolve flows belong to later phases and are
+// not registered here. There is no /runbook slash command.
 
 const start = async () => {
     await connectDB();
@@ -275,15 +277,7 @@ const start = async () => {
     const intentDetector = new MentionIntentDetector();
     const questionService = new QuestionAnsweringService(investigationService);
 
-    // ---- Slack Incident Card (post / pin / update / unpin) ----
-    // The card lifecycle is event-driven: posted by the mention handler,
-    // updated on resolution, unpinned once the runbook is attached
-    // (runbook generation happens AFTER resolution, never in the trigger path).
-    const cardService = new SlackIncidentCardService(bolt.client);
-    const slackCardHandler = new SlackCardHandler(cardService, investigationService);
-    eventBus.subscribe("*", slackCardHandler);
-
-    console.log("✓ Mention Assistant + Slack Card Initialized");
+    console.log("✓ Mention Assistant Initialized");
 
     // ---- Trigger Layer (initialized once at startup) ----
     const triggerRegistry = new TriggerRegistry();
@@ -332,7 +326,6 @@ const start = async () => {
         investigationService,
         intentDetector,
         questionService,
-        cardService,
     });
 
     console.log("✓ Slack Handlers Registered");
@@ -343,6 +336,7 @@ const start = async () => {
     await IncidentModel.ensureIndexes().catch((e) => console.warn("Incident index ensure failed:", e));
     await SlackProcessedEventModel.ensureIndexes().catch((e) => console.warn("Processed-event index ensure failed:", e));
     await AuditLogModel.ensureIndexes().catch((e) => console.warn("Audit index ensure failed:", e));
+    await IncidentJobModel.ensureIndexes().catch((e) => console.warn("Job index ensure failed:", e));
 
     const incidentRepo = new MongoIncidentRepository();
     const idempotencyStore = new MongoIdempotencyStore();
@@ -353,8 +347,6 @@ const start = async () => {
     const incidentBus = new IncidentBus();
     const coordinator = new IncidentCoordinator(incidentRepo, incidentBus, idempotencyStore, membership);
 
-    const incidentGateway = new SlackGateway(idempotencyStore);
-
     // Per-workspace authorized Slack clients. bolt.client at startup carries
     // no token under Socket Mode (custom authorize), so background and
     // event-driven code must resolve team clients here (not_authed otherwise).
@@ -363,16 +355,54 @@ const start = async () => {
         decrypt: decryptToken,
     });
 
+    const resolveDefaultCommander = async (teamId: string): Promise<string | null> => {
+        const doc = await InstallationModel.findOne({ teamId }).lean();
+        return doc?.defaultCommanderId ?? doc?.defaultLeadId ?? null;
+    };
+
+    // Durable incident jobs: persisted before the first run, replayed on boot.
+    const jobStore = new MongoJobStore();
+    const incidentJobCtx = { coordinator, clients: slackClients, resolveDefaultCommander };
+    const incidentGateway = new SlackGateway(idempotencyStore, {
+        store: jobStore,
+        dispatch: (d) => runIncidentJob(incidentJobCtx, { key: d.key, op: d.op as IncidentJobOp, teamId: d.teamId, params: d.params }),
+    });
+
     incidentBus.subscribe("*", new IncidentAuditHandler());
     incidentBus.subscribe("*", new IncidentNotifier(coordinator, slackClients));
+
+    // ---- Investigation incident card (update on resolve, unpin on runbook) ----
+    // Event-driven like everything else; resolves its own workspace client
+    // per event (the startup-global bolt.client carries no Socket Mode token).
+    eventBus.subscribe("*", new SlackCardHandler(slackClients, investigationService));
+    console.log("✓ Investigation Card Handler Initialized");
 
     registerIncidentSlackHandlers(bolt, {
         coordinator,
         gateway: incidentGateway,
         membership,
+        resolveDefaultCommander,
     });
 
     app.use("/api/incidents", createIncidentsRouter({ coordinator }));
+    app.use("/api/team", createTeamConfigRouter({ membership }));
+
+    // Crash recovery BEFORE accepting traffic: replay persisted jobs that
+    // never completed. Handlers stay idempotent so replays converge.
+    await incidentGateway.recover().catch((e) => {
+        console.warn("Job recovery failed:", e instanceof Error ? e.message : String(e));
+    });
+    console.log("✓ Incident Job Recovery Complete");
+
+    startUpdateReminderLoop({
+      incidentRepo,
+      listTeams: async () => {
+        const docs = await InstallationModel.find({}).select("teamId").lean();
+        return docs.map((d) => d.teamId);
+      },
+      clients: slackClients,
+    });
+    console.log("✓ Update Reminders Started");
 
     console.log("✓ Incident Coordination Layer Initialized");
 

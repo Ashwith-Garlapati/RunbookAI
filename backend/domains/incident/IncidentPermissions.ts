@@ -20,10 +20,12 @@ export type IncidentOperation =
   | "change_severity"
   | "change_status"
   | "assign_role"
+  | "acknowledge"
   | "assign_commander"
   | "escalate"
   | "handover"
   | "rename"
+  | "link_channel"
   | "resolve"
   | "cancel"
   | "close";
@@ -40,10 +42,12 @@ const MINIMUM_LEVEL: Readonly<Record<IncidentOperation, MembershipLevel>> = {
   change_severity: MembershipLevel.Responder,
   change_status: MembershipLevel.Responder,
   assign_role: MembershipLevel.Responder,
+  acknowledge: MembershipLevel.Member,
   assign_commander: MembershipLevel.Commander,
   escalate: MembershipLevel.Responder,
   handover: MembershipLevel.Commander,
   rename: MembershipLevel.Responder,
+  link_channel: MembershipLevel.Responder,
   resolve: MembershipLevel.Commander,
   cancel: MembershipLevel.Commander,
   close: MembershipLevel.Commander,
@@ -54,12 +58,14 @@ export function canPerform(level: MembershipLevel, op: IncidentOperation): boole
 }
 
 /**
- * The single Incident Lead seat requires responder level (so the reporter,
- * who is auto-registered as a participant, can assign it). Handover of the
- * seat stays commander-level and is held by the current lead.
+ * Incident Commander assignment rule:
+ * - vacant seat: responder level and above (reporter can take/fill it)
+ * - occupied seat (reassign over someone): commander level and above
+ *   (current commander, admin, owner). Members can never assign.
  */
-export function canAssignRole(level: MembershipLevel, _role: IncidentRole): boolean {
-  return levelAtLeast(level, MembershipLevel.Responder);
+export function canAssignRole(level: MembershipLevel, _role: IncidentRole, occupied: boolean): boolean {
+  if (!occupied) return levelAtLeast(level, MembershipLevel.Responder);
+  return levelAtLeast(level, MembershipLevel.Commander);
 }
 
 export class IncidentAuthorizationError extends Error {

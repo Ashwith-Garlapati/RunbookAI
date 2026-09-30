@@ -30,10 +30,14 @@ describe("permission matrix", () => {
     }
   });
 
-  it("lead seat requires responder level", () => {
-    expect(canAssignRole(MembershipLevel.Member, IncidentRole.IncidentLead)).toBe(false);
-    expect(canAssignRole(MembershipLevel.Responder, IncidentRole.IncidentLead)).toBe(true);
-    expect(canAssignRole(MembershipLevel.Commander, IncidentRole.IncidentLead)).toBe(true);
+  it("commander seat: vacant needs responder, occupied needs commander", () => {
+    // Vacant seat.
+    expect(canAssignRole(MembershipLevel.Member, IncidentRole.IncidentCommander, false)).toBe(false);
+    expect(canAssignRole(MembershipLevel.Responder, IncidentRole.IncidentCommander, false)).toBe(true);
+    // Occupied seat (reassign over someone).
+    expect(canAssignRole(MembershipLevel.Responder, IncidentRole.IncidentCommander, true)).toBe(false);
+    expect(canAssignRole(MembershipLevel.Commander, IncidentRole.IncidentCommander, true)).toBe(true);
+    expect(canAssignRole(MembershipLevel.Admin, IncidentRole.IncidentCommander, true)).toBe(true);
   });
 });
 
@@ -44,7 +48,7 @@ describe("DefaultMembershipResolver", () => {
     expect(await resolver.resolveLevel("T1", "U_admin")).toBe(MembershipLevel.Admin);
 
     const inc = Incident.declare({ teamId: "T1", title: "x", reporterId: "U_rep" });
-    inc.assignRole("U_rep", IncidentRole.IncidentLead, "U_cmd");
+    inc.assignRole("U_rep", IncidentRole.IncidentCommander, "U_cmd");
     expect(await resolver.resolveLevel("T1", "U_cmd", inc)).toBe(MembershipLevel.Commander);
     expect(await resolver.resolveLevel("T1", "U_rep", inc)).toBe(MembershipLevel.Responder);
     expect(await resolver.resolveLevel("T1", "U_stranger", inc)).toBe(MembershipLevel.Member);

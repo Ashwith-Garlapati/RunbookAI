@@ -2,7 +2,7 @@
  * Trigger Layer - Slack Slash Command Adapter
  *
  * Converts Slack slash command events into Trigger objects.
- * Supports: /investigate (and /runbook start for compatibility)
+ * Supports: /investigate
  *
  * Slack slash command payload format:
  * {
@@ -45,18 +45,10 @@ export class SlackSlashCommandAdapter implements ITriggerAdapter {
       return null;
     }
 
-    // Check if this is an /investigate or /runbook command
+    // Only /investigate is supported.
     const command = (event.command as string).toLowerCase();
-    if (command !== "/investigate" && command !== "/runbook") {
+    if (command !== "/investigate") {
       return null;
-    }
-
-    // For /runbook, check if it starts with "start"
-    if (command === "/runbook") {
-      const text = event.text?.trim() ?? "";
-      if (!text.startsWith("start")) {
-        return null;
-      }
     }
 
     const id = randomUUID() as TriggerId;

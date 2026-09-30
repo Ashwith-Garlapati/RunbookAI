@@ -27,10 +27,84 @@ function textInput(actionId: string, placeholder: string, multiline = false, ini
   };
 }
 
+/**
+ * Channel-style composer input (rich text: bold/italic/lists/mentions),
+ * instead of a plain textarea. Values arrive as rich_text_value and must be
+ * read with richTextToMarkdown(), never .value.
+ */
+export function richTextInput(actionId: string, placeholder: string, initial?: string): unknown {
+  return {
+    type: "rich_text_input",
+    action_id: actionId,
+    placeholder: { type: "plain_text", text: placeholder.slice(0, 150) },
+    ...(initial ? { initial_value: plainToRich(initial.slice(0, 2000)) } : {}),
+  };
+}
+
+function plainToRich(text: string): unknown {
+  return {
+    type: "rich_text",
+    elements: [{ type: "rich_text_section", elements: [{ type: "text", text }] }],
+  };
+}
+
+type RichNode = Record<string, unknown>;
+
+function inlineMarkdown(node: RichNode): string {
+  const type = String(node.type ?? "");
+  if (type === "user" && typeof node.user_id === "string") return `<@${node.user_id}>`;
+  if (type === "channel" && typeof node.channel_id === "string") return `<#${node.channel_id}>`;
+  if (type === "emoji" && typeof node.name === "string") return `:${node.name}:`;
+  if (type === "broadcast" && typeof node.range === "string") return `<!${node.range}>`;
+  if (type === "link" && typeof node.url === "string") {
+    const text = typeof node.text === "string" && node.text.length > 0 ? node.text : node.url;
+    return `<${node.url}|${text}>`;
+  }
+  let text = typeof node.text === "string" ? node.text : "";
+  const style = (node.style ?? {}) as RichNode;
+  if (style.code === true) text = `\`${text}\``;
+  else {
+    if (style.bold === true) text = `*${text}*`;
+    if (style.italic === true) text = `_${text}_`;
+    if (style.strike === true) text = `~${text}~`;
+  }
+  return text;
+}
+
+function blockMarkdown(block: RichNode): string {
+  const type = String(block.type ?? "");
+  const elements = Array.isArray(block.elements) ? (block.elements as RichNode[]) : [];
+  if (type === "rich_text_list") {
+    const ordered = block.style === "ordered";
+    return elements
+      .map((el, i) => {
+        const inner = Array.isArray((el as RichNode).elements)
+          ? ((el as RichNode).elements as RichNode[]).map(inlineMarkdown).join("")
+          : inlineMarkdown(el as RichNode);
+        return `${ordered ? `${i + 1}.` : "•"} ${inner}`;
+      })
+      .join("\n");
+  }
+  if (type === "rich_text_quote") {
+    return elements.map((el) => `> ${inlineMarkdown(el as RichNode)}`).join("");
+  }
+  if (type === "rich_text_preformatted") {
+    return `\`\`\`${elements.map((el) => inlineMarkdown(el as RichNode)).join("")}\`\`\``;
+  }
+  return elements.map((el) => inlineMarkdown(el as RichNode)).join("");
+}
+
+/** Converts a submitted rich_text_value into Slack mrkdwn, preserving wording. */
+export function richTextToMarkdown(value: unknown): string {
+  if (typeof value === "string") return value;
+  const root = (value ?? {}) as RichNode;
+  const blocks = Array.isArray(root.elements) ? (root.elements as RichNode[]) : [];
+  return blocks.map(blockMarkdown).join("\n").slice(0, 4000);
+}
+
 export const MODAL_CALLBACKS = {
   declare: "inc_modal_declare",
   update: "inc_modal_update",
-  severity: "inc_modal_severity",
   role: "inc_modal_role",
   action: "inc_modal_action",
   followup: "inc_modal_followup",
@@ -50,7 +124,7 @@ export function declareModal(privateMetadata = "", initial?: { description?: str
     close: plainText("Cancel"),
     blocks: [
       inputBlock("b_title", "Title", textInput("title", "Checkout API returning 500s")),
-      inputBlock("b_desc", "Description", textInput("desc", "What is happening?", true, initial?.description), true),
+      inputBlock("b_desc", "Description", richTextInput("desc", "What is happening?", initial?.description), true),
       inputBlock("b_sev", "Severity", {
         type: "static_select",
         action_id: "severity",
@@ -74,49 +148,52 @@ export function updateModal(incidentId: string): unknown {
     submit: plainText("Post"),
     close: plainText("Cancel"),
     blocks: [
-      inputBlock("b_sit", "Current situation", textInput("situation", "Where are we?", true)),
-      inputBlock("b_chg", "What changed", textInput("changed", "What is new?", true)),
-      inputBlock("b_imp", "Impact", textInput("impact", "Who is affected?", true)),
-      inputBlock("b_next", "Next step", textInput("next", "What happens next?", true)),
       inputBlock(
         "b_sev",
-        "Severity (optional)",
+        "Severity",
         {
           type: "static_select",
           action_id: "severity",
-          placeholder: plainText("Keep current severity"),
+          placeholder: plainText("Select severity"),
           options: [IncidentSeverity.Minor, IncidentSeverity.Major, IncidentSeverity.Critical].map((s) => ({
             text: plainText(SEVERITY_LABELS[s]),
             value: s,
           })),
         },
-        true,
       ),
       inputBlock(
         "b_status",
-        "Status (optional)",
+        "Status",
         {
           type: "static_select",
           action_id: "status",
-          placeholder: plainText("Keep current status"),
+          placeholder: plainText("Select status"),
           options: [
             IncidentStatus.Investigating,
             IncidentStatus.Mitigating,
             IncidentStatus.Monitoring,
           ].map((s) => ({ text: plainText(incidentStatusLabel(s)), value: s })),
         },
+      ),
+      inputBlock("b_chg", "What changed", richTextInput("changed", "What is new?")),
+      inputBlock(
+        "b_next_in",
+        "Next update in",
+        {
+          type: "static_select",
+          action_id: "next_in",
+          placeholder: plainText("No reminder"),
+          options: [
+            { text: plainText("10 minutes"), value: "10" },
+            { text: plainText("15 minutes"), value: "15" },
+            { text: plainText("30 minutes"), value: "30" },
+            { text: plainText("1 hour"), value: "60" },
+          ],
+        },
         true,
       ),
     ],
   };
-}
-
-export function severityModal(incidentId: string): unknown {
-  const options = [IncidentSeverity.Minor, IncidentSeverity.Major, IncidentSeverity.Critical].map((s) => ({
-    text: plainText(SEVERITY_LABELS[s]),
-    value: s,
-  }));
-  return modalWithSelect(MODAL_CALLBACKS.severity, incidentId, "Change severity", "Severity", "severity", options);
 }
 
 export function roleModal(incidentId: string): unknown {
@@ -153,7 +230,7 @@ export function actionModal(incidentId: string): unknown {
     close: plainText("Cancel"),
     blocks: [
       inputBlock("b_title", "Title", textInput("title", "Restart worker pool")),
-      inputBlock("b_desc", "Description", textInput("desc", "Details", true), true),
+      inputBlock("b_desc", "Description", richTextInput("desc", "Details"), true),
       inputBlock("b_assignee", "Assignee", {
         type: "users_select",
         action_id: "assignee",
@@ -173,7 +250,7 @@ export function followUpModal(incidentId: string): unknown {
     close: plainText("Cancel"),
     blocks: [
       inputBlock("b_title", "Title", textInput("title", "Add pool-size alert")),
-      inputBlock("b_desc", "Description", textInput("desc", "Details", true), true),
+      inputBlock("b_desc", "Description", richTextInput("desc", "Details"), true),
     ],
   };
 }
@@ -188,11 +265,11 @@ export function escalateModal(incidentId: string): unknown {
     close: plainText("Cancel"),
     blocks: [
       inputBlock("b_user", "Escalate to", {
-        type: "users_select",
+        type: "multi_users_select",
         action_id: "to_user",
-        placeholder: plainText("Select person"),
+        placeholder: plainText("Select people"),
       }),
-      inputBlock("b_reason", "Reason", textInput("reason", "Why is this needed?", true)),
+      inputBlock("b_reason", "Reason", richTextInput("reason", "Why is this needed?")),
     ],
   };
 }
@@ -202,11 +279,11 @@ export function handoverModal(incidentId: string): unknown {
     type: "modal",
     callback_id: MODAL_CALLBACKS.handover,
     private_metadata: incidentId,
-    title: plainText("Handover lead"),
+    title: plainText("Handover commander"),
     submit: plainText("Handover"),
     close: plainText("Cancel"),
     blocks: [
-      inputBlock("b_user", "New incident lead", {
+      inputBlock("b_user", "New commander", {
         type: "users_select",
         action_id: "new_commander",
         placeholder: plainText("Select person"),
@@ -224,8 +301,8 @@ export function resolveModal(incidentId: string): unknown {
     submit: plainText("Resolve"),
     close: plainText("Cancel"),
     blocks: [
-      inputBlock("b_summary", "Resolution summary", textInput("summary", "What stopped the incident?", true)),
-      inputBlock("b_mitigation", "Mitigation", textInput("mitigation", "What fixed it?", true), true),
+      inputBlock("b_summary", "Resolution summary", richTextInput("summary", "What stopped the incident?")),
+      inputBlock("b_mitigation", "Mitigation", richTextInput("mitigation", "What fixed it?"), true),
     ],
   };
 }
@@ -238,32 +315,6 @@ export function cancelModal(incidentId: string): unknown {
     title: plainText("Cancel incident"),
     submit: plainText("Cancel incident"),
     close: plainText("Back"),
-    blocks: [inputBlock("b_reason", "Reason", textInput("reason", "Why is this not an incident?", true))],
-  };
-}
-
-function modalWithSelect(
-  callbackId: string,
-  incidentId: string,
-  title: string,
-  label: string,
-  actionId: string,
-  options: Array<{ text: unknown; value: string }>,
-): unknown {
-  return {
-    type: "modal",
-    callback_id: callbackId,
-    private_metadata: incidentId,
-    title: plainText(title),
-    submit: plainText("Save"),
-    close: plainText("Cancel"),
-    blocks: [
-      inputBlock("b_value", label, {
-        type: "static_select",
-        action_id: actionId,
-        placeholder: plainText(`Select ${label.toLowerCase()}`),
-        options,
-      }),
-    ],
+    blocks: [inputBlock("b_reason", "Reason", richTextInput("reason", "Why is this not an incident?"))],
   };
 }

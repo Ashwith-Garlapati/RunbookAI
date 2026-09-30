@@ -77,13 +77,13 @@ describe("Incident lifecycle", () => {
 
   it("manages roles with history", () => {
     const inc = declareBasic();
-    inc.assignRole("U1", IncidentRole.IncidentLead, "U2");
-    inc.assignRole("U1", IncidentRole.IncidentLead, "U2"); // no-op, same assignee
-    inc.assignRole("U1", IncidentRole.IncidentLead, "U3");
-    expect(inc.currentRoles[IncidentRole.IncidentLead]).toBe("U3");
-    inc.unassignRole("U1", IncidentRole.IncidentLead);
-    inc.unassignRole("U1", IncidentRole.IncidentLead); // no-op, vacant
-    expect(inc.currentRoles[IncidentRole.IncidentLead] ?? null).toBe(null);
+    inc.assignRole("U1", IncidentRole.IncidentCommander, "U2");
+    inc.assignRole("U1", IncidentRole.IncidentCommander, "U2"); // no-op, same assignee
+    inc.assignRole("U1", IncidentRole.IncidentCommander, "U3");
+    expect(inc.currentRoles[IncidentRole.IncidentCommander]).toBe("U3");
+    inc.unassignRole("U1", IncidentRole.IncidentCommander);
+    inc.unassignRole("U1", IncidentRole.IncidentCommander); // no-op, vacant
+    expect(inc.currentRoles[IncidentRole.IncidentCommander] ?? null).toBe(null);
     expect(inc.roleHistory).toHaveLength(3);
     expect(inc.participants.some((p) => p.userId === "U3")).toBe(true);
   });
@@ -104,7 +104,7 @@ describe("Incident lifecycle", () => {
     const inc = declareBasic();
     inc.escalate("U1", "U9", "need DBA");
     inc.handover("U1", "U9");
-    expect(inc.currentRoles[IncidentRole.IncidentLead]).toBe("U9");
+    expect(inc.currentRoles[IncidentRole.IncidentCommander]).toBe("U9");
     inc.addMessageRef("U1", {
       channelId: "C1",
       messageTs: "1.0",
@@ -127,13 +127,40 @@ describe("Incident lifecycle", () => {
 
   it("preserves user wording in updates and validates fields", () => {
     const inc = declareBasic();
-    const update = inc.postUpdate("U1", {
-      situation: "  exact words  ",
-      changed: "c",
-      impact: "i",
-      nextStep: "n",
-    });
-    expect(update.situation).toBe("  exact words  ".slice(0, 2000));
-    expect(() => inc.postUpdate("U1", { situation: "", changed: "c", impact: "i", nextStep: "n" })).toThrow();
+    const update = inc.postUpdate("U1", { text: "  exact words  " });
+    expect(update.text).toBe("exact words");
+    expect(() => inc.postUpdate("U1", { text: "   " })).toThrow();
+  });
+
+  it("schedules and fires update reminders exactly once", () => {
+    const inc = declareBasic();
+    inc.postUpdate("U1", { text: "holding", nextUpdateInMinutes: 10 });
+    expect(inc.nextUpdateAt).toBeInstanceOf(Date);
+    expect(inc.nextUpdateFor).toBe("U1");
+    // Not due yet.
+    expect(inc.markReminderSent(new Date(Date.now() - 60_000))).toBe(false);
+    // Due: fires once, clears schedule.
+    expect(inc.markReminderSent(new Date(Date.now() + 11 * 60_000))).toBe(true);
+    expect(inc.nextUpdateAt).toBe(null);
+    expect(inc.markReminderSent(new Date(Date.now() + 12 * 60_000))).toBe(false);
+    // A fresh update without duration clears any schedule.
+    inc.postUpdate("U1", { text: "done", nextUpdateInMinutes: 30 });
+    expect(inc.nextUpdateAt).toBeInstanceOf(Date);
+    inc.postUpdate("U1", { text: "done for real" });
+    expect(inc.nextUpdateAt).toBe(null);
+  });
+
+  it("relinks coordination to another channel with history", () => {
+    const inc = declareBasic();
+    inc.pullEvents();
+    inc.relinkChannel("U1", "C2", "incident-two");
+    expect(inc.channelId).toBe("C2");
+    expect(inc.controlMessageTs).toBe(null);
+    expect(inc.timeline.some((t) => t.type === "CHANNEL_LINKED")).toBe(true);
+    const events = inc.pullEvents();
+    expect(events.some((e) => e.eventType === "incident.channel_linked")).toBe(true);
+    // Same-channel relink is a no-op (no events).
+    inc.relinkChannel("U1", "C2", "incident-two");
+    expect(inc.pullEvents()).toHaveLength(0);
   });
 });

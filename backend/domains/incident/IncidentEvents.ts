@@ -11,6 +11,7 @@ export type IncidentEventType =
   | "incident.status_changed"
   | "incident.severity_changed"
   | "incident.role_assigned"
+  | "incident.role_acknowledged"
   | "incident.role_unassigned"
   | "incident.participant_added"
   | "incident.update_posted"
@@ -22,6 +23,7 @@ export type IncidentEventType =
   | "incident.escalated"
   | "incident.handover"
   | "incident.message_added"
+  | "incident.channel_linked"
   | "incident.resolved"
   | "incident.cancelled"
   | "incident.closed";
@@ -43,6 +45,7 @@ export enum IncidentTimelineType {
   StatusChanged = "STATUS_CHANGED",
   RoleAssigned = "ROLE_ASSIGNED",
   RoleReassigned = "ROLE_REASSIGNED",
+  RoleAcknowledged = "ROLE_ACKNOWLEDGED",
   RoleUnassigned = "ROLE_UNASSIGNED",
   ActionCreated = "ACTION_CREATED",
   ActionUpdated = "ACTION_UPDATED",
@@ -50,6 +53,7 @@ export enum IncidentTimelineType {
   FollowUpCreated = "FOLLOW_UP_CREATED",
   UpdatePosted = "UPDATE_POSTED",
   MessageAdded = "MESSAGE_ADDED_TO_TIMELINE",
+  ChannelLinked = "CHANNEL_LINKED",
   EscalationCreated = "ESCALATION_CREATED",
   HandoverCompleted = "HANDOVER_COMPLETED",
   Renamed = "INCIDENT_RENAMED",

@@ -54,20 +54,20 @@ function createRunbookAttachedEvent(investigationId = "inv-1"): IDomainEvent {
 
 describe("SlackCardHandler - incident card lifecycle", () => {
   let client: ReturnType<typeof createMockClient>;
-  let cardService: SlackIncidentCardService;
+  let provider: { forTeam: (teamId: string) => Promise<unknown> };
 
   beforeEach(() => {
     client = createMockClient();
-    cardService = new SlackIncidentCardService(client);
+    provider = { forTeam: async () => client };
   });
 
   it("updates the card to Resolved when the investigation is resolved", async () => {
     const investigation = createMockInvestigation({
-      slackChannelId: "C12345",
+      slackChannelId: "C12345", teamId: "T1",
       slackCardTs: "123.456",
     });
     const handler = new SlackCardHandler(
-      cardService,
+      provider,
       createMockInvestigationService(investigation) as any,
     );
 
@@ -82,11 +82,11 @@ describe("SlackCardHandler - incident card lifecycle", () => {
 
   it("unpins the card only after the runbook is attached (post-resolution)", async () => {
     const investigation = createMockInvestigation({
-      slackChannelId: "C12345",
+      slackChannelId: "C12345", teamId: "T1",
       slackCardTs: "123.456",
     });
     const handler = new SlackCardHandler(
-      cardService,
+      provider,
       createMockInvestigationService(investigation) as any,
     );
 
@@ -100,11 +100,11 @@ describe("SlackCardHandler - incident card lifecycle", () => {
 
   it("does NOT unpin on resolution - only after the runbook is published", async () => {
     const investigation = createMockInvestigation({
-      slackChannelId: "C12345",
+      slackChannelId: "C12345", teamId: "T1",
       slackCardTs: "123.456",
     });
     const handler = new SlackCardHandler(
-      cardService,
+      provider,
       createMockInvestigationService(investigation) as any,
     );
 
@@ -116,7 +116,7 @@ describe("SlackCardHandler - incident card lifecycle", () => {
   it("does nothing for investigations without a card (slash-command created)", async () => {
     const investigation = createMockInvestigation({});
     const handler = new SlackCardHandler(
-      cardService,
+      provider,
       createMockInvestigationService(investigation) as any,
     );
 
@@ -129,11 +129,11 @@ describe("SlackCardHandler - incident card lifecycle", () => {
 
   it("ignores unrelated domain events", async () => {
     const investigation = createMockInvestigation({
-      slackChannelId: "C12345",
+      slackChannelId: "C12345", teamId: "T1",
       slackCardTs: "123.456",
     });
     const handler = new SlackCardHandler(
-      cardService,
+      provider,
       createMockInvestigationService(investigation) as any,
     );
 

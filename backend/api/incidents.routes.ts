@@ -13,8 +13,9 @@ import type { IncidentCoordinator } from "../domains/incident/IncidentCoordinato
 import type { Incident } from "../domains/incident/Incident.js";
 import { IncidentStatus } from "../domains/incident/IncidentStatus.js";
 import { parseSeverity } from "../domains/incident/IncidentSeverity.js";
-import { parseRole } from "../domains/incident/IncidentRoles.js";
+import { parseRole, IncidentRole } from "../domains/incident/IncidentRoles.js";
 import { IncidentAuthorizationError } from "../domains/incident/IncidentPermissions.js";
+import { IncidentVersionConflictError } from "../domains/incident/IncidentRepository.js";
 import { newCorrelationId, logger } from "../observability/logger.js";
 
 export interface IncidentsApiDeps {
@@ -49,6 +50,14 @@ export function createIncidentsRouter(deps: IncidentsApiDeps): Router {
       res.status(403).json({ error: "forbidden", operation: error.operation });
       return;
     }
+    if (error instanceof IncidentVersionConflictError) {
+      res.status(409).json({
+        error: "version conflict — reload the incident and retry",
+        expectedVersion: error.expectedVersion,
+        currentVersion: error.currentVersion,
+      });
+      return;
+    }
     const withStatus = error as { status?: number; message?: string };
     if (withStatus?.status === 401) {
       res.status(401).json({ error: "unauthorized" });
@@ -59,7 +68,7 @@ export function createIncidentsRouter(deps: IncidentsApiDeps): Router {
       res.status(404).json({ error: message });
       return;
     }
-    if (/Invalid|required|Only |Cannot |already/i.test(message)) {
+    if (/Invalid|required|Only |Cannot |already|No assignee/i.test(message)) {
       res.status(400).json({ error: message });
       return;
     }
@@ -266,15 +275,23 @@ export function createIncidentsRouter(deps: IncidentsApiDeps): Router {
   router.post("/:id/updates", async (req: Request, res: Response) => {
     try {
       const { a, id } = await load(req);
-      const { situation, changed, impact, nextStep } = req.body ?? {};
-      if (!situation || !changed || !impact || !nextStep) {
-        res.status(400).json({ error: "situation, changed, impact, nextStep are required" });
+      const { text, changed, nextUpdateInMinutes } = req.body ?? {};
+      const body = text ?? changed;
+      if (!body || typeof body !== "string") {
+        res.status(400).json({ error: "text is required" });
         return;
       }
+      const minutes =
+        nextUpdateInMinutes === undefined || nextUpdateInMinutes === null
+          ? null
+          : Number(nextUpdateInMinutes);
       const incident = await coordinator.postUpdate(
         { ...a },
         id,
-        { situation: String(situation), changed: String(changed), impact: String(impact), nextStep: String(nextStep) },
+        {
+          text: String(body),
+          ...(minutes !== null && Number.isFinite(minutes) ? { nextUpdateInMinutes: minutes } : {}),
+        },
       );
       res.status(201).json(serialize(incident));
     } catch (error) {
@@ -305,12 +322,16 @@ export function createIncidentsRouter(deps: IncidentsApiDeps): Router {
   router.post("/:id/escalations", async (req: Request, res: Response) => {
     try {
       const { a, id } = await load(req);
-      const { toUser, reason } = req.body ?? {};
-      if (!toUser || !reason) {
-        res.status(400).json({ error: "toUser and reason are required" });
+      const { toUser, toUsers, reason } = req.body ?? {};
+      const targets = Array.isArray(toUsers) ? toUsers.map(String) : toUser ? [String(toUser)] : [];
+      if (targets.length === 0 || !reason) {
+        res.status(400).json({ error: "toUser (or toUsers array) and reason are required" });
         return;
       }
-      const incident = await coordinator.escalate({ ...a }, id, String(toUser), String(reason));
+      let incident = await coordinator.get(id, a.teamId);
+      for (const target of targets) {
+        incident = await coordinator.escalate({ ...a }, id, target, String(reason));
+      }
       res.status(201).json(serialize(incident));
     } catch (error) {
       fail(res, error);
@@ -396,6 +417,42 @@ export function createIncidentsRouter(deps: IncidentsApiDeps): Router {
     try {
       const { a, id } = await load(req);
       const incident = await coordinator.close({ ...a }, id);
+      res.json(serialize(incident));
+    } catch (error) {
+      fail(res, error);
+    }
+  });
+
+  router.post("/:id/acknowledge", async (req: Request, res: Response) => {
+    try {
+      const { a, id } = await load(req);
+      const rawRole = req.body?.role;
+      const role = rawRole === undefined ? IncidentRole.IncidentCommander : parseRole(rawRole);
+      if (!role) {
+        res.status(400).json({ error: "invalid role" });
+        return;
+      }
+      const incident = await coordinator.acknowledgeRole({ ...a }, id, role);
+      res.json(serialize(incident));
+    } catch (error) {
+      fail(res, error);
+    }
+  });
+
+  router.post("/:id/link", async (req: Request, res: Response) => {
+    try {
+      const { a, id } = await load(req);
+      const { channelId, channelName } = req.body ?? {};
+      if (!channelId) {
+        res.status(400).json({ error: "channelId is required" });
+        return;
+      }
+      const incident = await coordinator.linkChannel(
+        { ...a },
+        id,
+        String(channelId),
+        channelName ? String(channelName) : String(channelId),
+      );
       res.json(serialize(incident));
     } catch (error) {
       fail(res, error);

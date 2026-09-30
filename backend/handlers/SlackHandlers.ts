@@ -43,11 +43,10 @@ import type { InvestigationService } from "../domains/investigation/Investigatio
 import { InvestigationStatus } from "../domains/investigation/InvestigationStatus.js";
 import { TriggerSource } from "../domains/investigation/TriggerSource.js";
 import { TriggerType } from "../domains/investigation/TriggerType.js";
-import { TriggerValidationError } from "../domains/trigger/types.js";
 import type { MentionIntentDetector } from "../services/MentionIntentDetector.js";
 import { MentionIntent } from "../services/MentionIntentDetector.js";
 import type { QuestionAnsweringService } from "../services/QuestionAnsweringService.js";
-import type { SlackIncidentCardService } from "../services/SlackIncidentCardService.js";
+import { SlackIncidentCardService } from "../services/SlackIncidentCardService.js";
 import { formatStatus } from "../services/formatStatus.js";
 
 export interface SlackHandlerDeps {
@@ -57,7 +56,6 @@ export interface SlackHandlerDeps {
   investigationService: InvestigationService;
   intentDetector: MentionIntentDetector;
   questionService: QuestionAnsweringService;
-  cardService: SlackIncidentCardService;
 }
 
 // ===========================
@@ -101,44 +99,6 @@ function registerSlashCommandHandlers(bolt: App, deps: SlackHandlerDeps): void {
       log("Trigger", "Validated", { Source: "Slack", Type: "SlashCommand" });
       await replyWithDispatchResult(dispatcher, trigger, client, userId, channelId);
     } catch (error) {
-      await replyFailure(client, userId, channelId);
-    }
-  });
-
-  // /runbook start - legacy command, creates an investigation through the Trigger Layer
-  bolt.command("/runbook", async ({ command, ack, client }) => {
-    await ack();
-
-    const { registry, factory, dispatcher } = deps;
-    const userId = command.user_id;
-    const channelId = command.channel_id;
-
-    log("Trigger", "Received", { Source: "Slack", Type: "SlashCommand", Command: "/runbook" });
-
-    const adapter = registry.findAdapter(TriggerSource.Slack, TriggerType.SlashCommand);
-    if (!adapter) {
-      await replyUnavailable(client, userId, channelId);
-      return;
-    }
-
-    try {
-      const trigger = factory.create(adapter, command);
-      log("Trigger", "Validated", { Source: "Slack", Type: "SlashCommand" });
-      await replyWithDispatchResult(dispatcher, trigger, client, userId, channelId);
-    } catch (error) {
-      // The slash adapter only accepts "/runbook start". Everything else is
-      // rejected here, so the legacy subcommands (search / github-link / resolve)
-      // are not re-implemented in the Trigger Layer.
-      // TODO(Runbook Phase): Restore /runbook search, github-link and resolve
-      // outside the investigation trigger flow.
-      if (error instanceof TriggerValidationError) {
-        await client.chat.postEphemeral({
-          channel: channelId,
-          user: userId,
-          text: "Only `/runbook start` is supported. Use `/investigate <issue>` to create an investigation.",
-        });
-        return;
-      }
       await replyFailure(client, userId, channelId);
     }
   });
@@ -214,7 +174,10 @@ async function handleMentionInvestigate(
   channelId: string,
   adaptedTrigger: Trigger,
 ): Promise<void> {
-  const { factory, dispatcher, cardService, investigationService } = deps;
+  const { factory, dispatcher, investigationService } = deps;
+  // Card service is built per event from the authorized listener client —
+  // never from a shared startup client (no Socket Mode token there).
+  const cardService = new SlackIncidentCardService(client);
 
   try {
     // factory.create() re-adapts + validates through the Trigger Layer
@@ -273,7 +236,7 @@ async function handleMentionInvestigate(
       }
     }
 
-    await client.chat.postEphemeral({
+    await postEphemeralSafe(client, {
       channel: channelId,
       user: userId,
       thread_ts: threadTs,
@@ -308,7 +271,7 @@ async function handleMentionQuestion(
     });
 
     // Question answers are ephemeral - only the requesting user sees them.
-    await client.chat.postEphemeral({
+    await postEphemeralSafe(client, {
       channel: channelId,
       user: userId,
       thread_ts: (event as any).thread_ts || event.ts,
@@ -338,7 +301,7 @@ async function handleMentionResolve(
     );
 
     if (!investigation) {
-      await client.chat.postEphemeral({
+      await postEphemeralSafe(client, {
         channel: channelId,
         user: userId,
         thread_ts: threadTs,
@@ -350,7 +313,7 @@ async function handleMentionResolve(
     }
 
     if (investigation.status === InvestigationStatus.Resolved) {
-      await client.chat.postEphemeral({
+      await postEphemeralSafe(client, {
         channel: channelId,
         user: userId,
         thread_ts: threadTs,
@@ -362,7 +325,7 @@ async function handleMentionResolve(
     const resolved = await investigationService.resolveInvestigation(investigation.id, userId);
     log("Investigation", "Resolved", { investigation: resolved.id });
 
-    await client.chat.postEphemeral({
+    await postEphemeralSafe(client, {
       channel: channelId,
       user: userId,
       thread_ts: threadTs,
@@ -391,7 +354,7 @@ async function handleMentionReopen(
     );
 
     if (!investigation) {
-      await client.chat.postEphemeral({
+      await postEphemeralSafe(client, {
         channel: channelId,
         user: userId,
         thread_ts: threadTs,
@@ -403,7 +366,7 @@ async function handleMentionReopen(
     }
 
     if (investigation.status !== InvestigationStatus.Resolved) {
-      await client.chat.postEphemeral({
+      await postEphemeralSafe(client, {
         channel: channelId,
         user: userId,
         thread_ts: threadTs,
@@ -417,7 +380,7 @@ async function handleMentionReopen(
     const reopened = await investigationService.reopenInvestigation(investigation.id, userId);
     log("Investigation", "Reopened", { investigation: reopened.id });
 
-    await client.chat.postEphemeral({
+    await postEphemeralSafe(client, {
       channel: channelId,
       user: userId,
       thread_ts: threadTs,
@@ -482,7 +445,7 @@ function registerShortcutHandler(bolt: App, deps: SlackHandlerDeps): void {
         return;
       }
 
-      await client.chat.postEphemeral({
+      await postEphemeralSafe(client, {
         channel: channelId,
         user: userId,
         text: result.associated ? "🔁 Investigation Reused" : "✅ Investigation Created",
@@ -519,7 +482,7 @@ async function replyWithDispatchResult(
 
   log("Investigation", "Created", { investigation: result.investigationId, status: result.status });
 
-  await client.chat.postEphemeral({
+  await postEphemeralSafe(client, {
     channel: channelId,
     user: userId,
     text: "✅ Investigation Created",
@@ -623,10 +586,10 @@ async function replyChooseInvestigation(
     `Reply with the one to use (e.g. \`@RunbookAI use ${firstId}\`).`;
 
   if (ephemeral) {
-    await client.chat.postEphemeral({ channel: channelId, user: recipient, text });
+    await postEphemeralSafe(client, { channel: channelId, user: recipient, text });
     return;
   }
-  await client.chat.postMessage({ channel: channelId, thread_ts: recipient, text });
+  await postMessageSafe(client, { channel: channelId, thread_ts: recipient, text });
 }
 
 /**
@@ -689,7 +652,7 @@ function buildReopenedBlocks(investigation: any): any[] {
 }
 
 async function replyHelp(client: any, userId: string, channelId: string, threadTs: string): Promise<void> {
-  await client.chat.postEphemeral({
+  await postEphemeralSafe(client, {
     channel: channelId,
     user: userId,
     thread_ts: threadTs,
@@ -727,7 +690,7 @@ async function replyClarification(
   channelId: string,
   threadTs: string,
 ): Promise<void> {
-  await client.chat.postEphemeral({
+  await postEphemeralSafe(client, {
     channel: channelId,
     user: userId,
     thread_ts: threadTs,
@@ -742,7 +705,7 @@ async function replyClarification(
 }
 
 async function replyUnavailable(client: any, userId: string, channelId: string): Promise<void> {
-  await client.chat.postEphemeral({
+  await postEphemeralSafe(client, {
     channel: channelId,
     user: userId,
     text: "❌ Trigger adapter not configured. Please contact an administrator.",
@@ -750,7 +713,7 @@ async function replyUnavailable(client: any, userId: string, channelId: string):
 }
 
 async function replyFailure(client: any, userId: string, channelId: string): Promise<void> {
-  await client.chat.postEphemeral({
+  await postEphemeralSafe(client, {
     channel: channelId,
     user: userId,
     text: "❌ Something went wrong. Please try again.",
@@ -760,6 +723,34 @@ async function replyFailure(client: any, userId: string, channelId: string): Pro
 // ===========================
 //  Structured Logging
 // ===========================
+
+/**
+ * Best-effort Slack replies. Domain state is always correct by reply time,
+ * so a failed reply must never throw: log the Slack error code (e.g.
+ * not_in_channel, channel_not_found) and swallow. This is what makes
+ * "nothing appeared in Slack" diagnosable from backend logs alone.
+ */
+async function postEphemeralSafe(client: any, args: Record<string, unknown>): Promise<void> {
+  try {
+    await client.chat.postEphemeral(args);
+  } catch (error) {
+    log("Slack", "ReplyFailed", { Reason: slackErrorCode(error) });
+  }
+}
+
+async function postMessageSafe(client: any, args: Record<string, unknown>): Promise<void> {
+  try {
+    await client.chat.postMessage(args);
+  } catch (error) {
+    log("Slack", "ReplyFailed", { Reason: slackErrorCode(error) });
+  }
+}
+
+function slackErrorCode(error: unknown): string {
+  const data = (error as { data?: { error?: unknown } })?.data;
+  if (data && typeof data.error === "string") return data.error;
+  return error instanceof Error ? error.message : "unknown";
+}
 
 /**
  * Structured log: [<Section>] <Step> | Key=Value

@@ -10,7 +10,6 @@ import { SlackMentionAdapter } from "../domains/trigger/adapters/SlackMentionAda
 import type { InvestigationService } from "../domains/investigation/InvestigationService.js";
 import { MentionIntentDetector } from "../services/MentionIntentDetector.js";
 import type { QuestionAnsweringService } from "../services/QuestionAnsweringService.js";
-import { SlackIncidentCardService } from "../services/SlackIncidentCardService.js";
 import { InvestigationStatus } from "../domains/investigation/InvestigationStatus.js";
 
 function createMockInvestigationService(): InvestigationService {
@@ -116,7 +115,6 @@ describe("@RunbookAI Mention Intents", () => {
       investigationService: service,
       intentDetector: new MentionIntentDetector(),
       questionService: questionService ?? createMockQuestionService(),
-      cardService: new SlackIncidentCardService(client),
     };
   }
 
@@ -170,8 +168,8 @@ describe("@RunbookAI Mention Intents", () => {
 
     expect(service.createInvestigation).not.toHaveBeenCalled();
     expect(questionService.answer).toHaveBeenCalled();
-    expect(client.chat.postMessage).toHaveBeenCalled();
-    const postArgs = (client.chat.postMessage as any).mock.calls[0][0];
+    expect(client.chat.postEphemeral).toHaveBeenCalled();
+    const postArgs = (client.chat.postEphemeral as any).mock.calls[0][0];
     expect(postArgs.text).toContain("Summary of the thread...");
   });
 
@@ -199,9 +197,9 @@ describe("@RunbookAI Mention Intents", () => {
 
     expect(service.createInvestigation).not.toHaveBeenCalled();
     expect(service.resolveInvestigation).toHaveBeenCalledWith("inv-123", "U12345");
-    expect(client.chat.postMessage).toHaveBeenCalled();
+    expect(client.chat.postEphemeral).toHaveBeenCalled();
 
-    const blocks = JSON.stringify((client.chat.postMessage as any).mock.calls[0][0].blocks);
+    const blocks = JSON.stringify((client.chat.postEphemeral as any).mock.calls[0][0].blocks);
     expect(blocks).toContain("Investigation Resolved");
     expect(blocks).toContain("Resolved");
     expect(blocks).toContain("U12345");
@@ -226,7 +224,7 @@ describe("@RunbookAI Mention Intents", () => {
     await invokeMention(baseMention({ text: "<@U_BOT_ID> resolve this investigation" }));
 
     expect(service.resolveInvestigation).not.toHaveBeenCalled();
-    const postArgs = (client.chat.postMessage as any).mock.calls[0][0];
+    const postArgs = (client.chat.postEphemeral as any).mock.calls[0][0];
     expect(postArgs.text).toContain("couldn't find a linked investigation");
   });
 
@@ -242,7 +240,7 @@ describe("@RunbookAI Mention Intents", () => {
     await invokeMention(baseMention({ text: "<@U_BOT_ID> resolve this investigation" }));
 
     expect(service.resolveInvestigation).not.toHaveBeenCalled();
-    const postArgs = (client.chat.postMessage as any).mock.calls[0][0];
+    const postArgs = (client.chat.postEphemeral as any).mock.calls[0][0];
     expect(postArgs.text).toContain("already resolved");
   });
 
@@ -251,7 +249,7 @@ describe("@RunbookAI Mention Intents", () => {
 
     expect(service.createInvestigation).not.toHaveBeenCalled();
     expect(service.resolveInvestigation).not.toHaveBeenCalled();
-    const postArgs = (client.chat.postMessage as any).mock.calls[0][0];
+    const postArgs = (client.chat.postEphemeral as any).mock.calls[0][0];
     expect(JSON.stringify(postArgs.blocks)).toContain("Investigate");
     expect(JSON.stringify(postArgs.blocks)).toContain("Resolve");
   });
@@ -266,7 +264,7 @@ describe("@RunbookAI Mention Intents", () => {
     await invokeMention(baseMention({ text: "<@U_BOT_ID> !!?" }));
 
     expect(service.createInvestigation).not.toHaveBeenCalled();
-    const postArgs = (client.chat.postMessage as any).mock.calls[0][0];
+    const postArgs = (client.chat.postEphemeral as any).mock.calls[0][0];
     expect(postArgs.text).toContain("not sure what you'd like me to do");
   });
 
@@ -333,7 +331,7 @@ describe("@RunbookAI Mention Intents", () => {
 
       expect(service.createOrAssociateInvestigation).toHaveBeenCalledTimes(1);
       expect(service.createInvestigation).toHaveBeenCalledTimes(1);
-      const confirmation = (client.chat.postMessage as any).mock.calls.find((call: any) =>
+      const confirmation = (client.chat.postEphemeral as any).mock.calls.find((call: any) =>
         JSON.stringify(call[0].blocks ?? []).includes("Investigation Created"),
       );
       expect(confirmation).toBeDefined();
@@ -345,7 +343,7 @@ describe("@RunbookAI Mention Intents", () => {
 
       await invokeMention(baseMention({ text: "<@U_BOT_ID> investigate this" }));
 
-      const postArgs = (client.chat.postMessage as any).mock.calls[0][0];
+      const postArgs = (client.chat.postEphemeral as any).mock.calls[0][0];
       expect(postArgs.text).toContain("Investigation Reused");
       const blocks = JSON.stringify(postArgs.blocks);
       expect(blocks).toContain("INV-001");
@@ -365,11 +363,11 @@ describe("@RunbookAI Mention Intents", () => {
       await invokeMention(baseMention({ text: "<@U_BOT_ID> investigate this" }));
 
       expect(service.createOrAssociateInvestigation).toHaveBeenCalledTimes(2);
-      const ids = (client.chat.postMessage as any).mock.calls.map((call: any) =>
+      const ids = (client.chat.postEphemeral as any).mock.calls.map((call: any) =>
         JSON.stringify(call[0].blocks ?? []) === "[]" ? call[0].text : call[0].blocks[1].fields[0].text,
       );
       expect(ids).toContain("*ID:*\nINV-1");
-      expect(client.chat.postMessage).toHaveBeenCalledTimes(2);
+      expect(client.chat.postEphemeral).toHaveBeenCalledTimes(2);
     });
 
     it("asks the user to choose when multiple investigations match", async () => {
@@ -391,7 +389,7 @@ describe("@RunbookAI Mention Intents", () => {
 
       await invokeMention(baseMention({ text: "<@U_BOT_ID> investigate this" }));
 
-      const postArgs = (client.chat.postMessage as any).mock.calls[0][0];
+      const postArgs = (client.chat.postEphemeral as any).mock.calls[0][0];
       expect(postArgs.text).toContain("I found *2 active investigations*");
       expect(postArgs.text).toContain("INV-1");
       expect(postArgs.text).toContain("INV-2");
@@ -405,7 +403,7 @@ describe("@RunbookAI Mention Intents", () => {
 
       expect(service.createOrAssociateInvestigation).not.toHaveBeenCalled();
       expect(service.createInvestigation).not.toHaveBeenCalled();
-      expect(client.chat.postMessage).toHaveBeenCalled();
+      expect(client.chat.postEphemeral).toHaveBeenCalled();
     });
   });
 

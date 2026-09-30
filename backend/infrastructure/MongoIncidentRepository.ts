@@ -11,6 +11,7 @@ import type {
   IIncidentRepository,
   IIdempotencyStore,
 } from "../domains/incident/IncidentRepository.js";
+import { IncidentVersionConflictError } from "../domains/incident/IncidentRepository.js";
 import type {
   IncidentId,
   TeamId,
@@ -27,8 +28,7 @@ const OPEN_STATUSES = [
   IncidentStatus.Monitoring,
 ];
 
-function toDocument(incident: Incident): Record<string, unknown> {
-  const props = incident.toProps();
+function toDocument(incident: Incident): Record<string, unknown> {  const props = incident.toProps();
   return {
     _id: props.id,
     teamId: props.teamId,
@@ -61,10 +61,52 @@ function toDocument(incident: Incident): Record<string, unknown> {
     resolution: props.resolution,
     cancelInfo: props.cancelInfo,
     closeInfo: props.closeInfo,
+    nextUpdateAt: props.nextUpdateAt,
+    nextUpdateFor: props.nextUpdateFor,
     investigationId: props.investigationId,
     createdAt: props.createdAt,
     updatedAt: props.updatedAt,
+    version: props.version,
   };
+}
+
+/** Maps stored updates; legacy 4-field rows are composed into text. */
+function toUpdate(raw: unknown): Incident["updates"][number] {
+  const u = (raw ?? {}) as Record<string, unknown>;
+  const text =
+    typeof u.text === "string" && u.text.length > 0
+      ? u.text
+      : [u.situation, u.changed, u.impact, u.nextStep]
+          .filter((v): v is string => typeof v === "string" && v.length > 0)
+          .join("\n");
+  return {
+    id: String(u.id ?? ""),
+    author: String(u.author ?? ""),
+    at: u.at instanceof Date ? u.at : new Date(String(u.at ?? Date.now())),
+    text,
+  };
+}
+
+/**
+ * Dual-read for the pre-rename `incident_lead` key: rows written before the
+ * Incident Commander rename load with the canonical key. Writes always use
+ * the new value, so old rows heal on first update. No migration needed.
+ */
+function normalizeRoles(raw: unknown): Incident["currentRoles"] {
+  const roles = ((raw ?? {}) as Record<string, string | null>);
+  if (roles.incident_lead !== undefined && roles.incident_commander === undefined) {
+    const { incident_lead: legacy, ...rest } = roles;
+    return { ...rest, incident_commander: legacy } as Incident["currentRoles"];
+  }
+  return roles as Incident["currentRoles"];
+}
+
+function normalizeHistoryRole<T>(entry: T): T {
+  const rec = (entry ?? {}) as Record<string, unknown>;
+  if (rec.role === "incident_lead") {
+    return { ...rec, role: "incident_commander" } as T;
+  }
+  return entry;
 }
 
 function toDomain(doc: Record<string, unknown>): Incident {
@@ -87,10 +129,10 @@ function toDomain(doc: Record<string, unknown>): Incident {
     originMessageTs: (doc.originMessageTs as string | null) ?? null,
     controlMessageTs: (doc.controlMessageTs as string | null) ?? null,
     reporterId: String(doc.reporterId ?? ""),
-    currentRoles: (doc.currentRoles as Incident["currentRoles"]) ?? {},
-    roleHistory: arr(doc.roleHistory),
+    currentRoles: normalizeRoles(doc.currentRoles),
+    roleHistory: arr<Record<string, unknown>>(doc.roleHistory).map(normalizeHistoryRole) as unknown as Incident["roleHistory"],
     participants: arr(doc.participants),
-    updates: arr(doc.updates),
+    updates: arr(doc.updates).map(toUpdate),
     actions: arr(doc.actions),
     followUps: arr(doc.followUps),
     escalations: arr(doc.escalations),
@@ -102,9 +144,12 @@ function toDomain(doc: Record<string, unknown>): Incident {
     resolution: (doc.resolution as Incident["resolution"]) ?? null,
     cancelInfo: (doc.cancelInfo as Incident["cancelInfo"]) ?? null,
     closeInfo: (doc.closeInfo as Incident["closeInfo"]) ?? null,
+    nextUpdateAt: doc.nextUpdateAt ? d(doc.nextUpdateAt) : null,
+    nextUpdateFor: (doc.nextUpdateFor as string | null) ?? null,
     investigationId: (doc.investigationId as string | null) ?? null,
     createdAt: d(doc.createdAt),
     updatedAt: d(doc.updatedAt),
+    version: typeof doc.version === "number" ? doc.version : 1,
   });
 }
 
@@ -116,7 +161,26 @@ export class MongoIncidentRepository implements IIncidentRepository {
   }
 
   async update(incident: Incident): Promise<Incident> {
-    await IncidentModel.findByIdAndUpdate(incident.id, { $set: toDocument(incident) }, { upsert: true });
+    const expected = incident.version;
+    // Legacy rows predate versioning: match either the expected version or
+    // its absence (one-time bootstrap; every write stamps a version after).
+    const updated = await IncidentModel.findOneAndUpdate(
+      {
+        _id: incident.id,
+        $or: [{ version: expected }, { version: { $exists: false } }],
+      },
+      { $set: { ...toDocument(incident), version: expected + 1 } },
+      { new: true },
+    ).lean();
+    if (!updated) {
+      const current = await IncidentModel.findById(incident.id).select("version").lean();
+      const currentVersion =
+        current && typeof (current as { version?: unknown }).version === "number"
+          ? (current as { version: number }).version
+          : null;
+      throw new IncidentVersionConflictError(incident.id, expected, currentVersion);
+    }
+    incident.version = expected + 1;
     return incident;
   }
 

@@ -12,7 +12,6 @@ import { TriggerType } from "../domains/investigation/TriggerType.js";
 import type { InvestigationService } from "../domains/investigation/InvestigationService.js";
 import { MentionIntentDetector } from "../services/MentionIntentDetector.js";
 import type { QuestionAnsweringService } from "../services/QuestionAnsweringService.js";
-import { SlackIncidentCardService } from "../services/SlackIncidentCardService.js";
 
 function createMockInvestigationService(): InvestigationService {
   const service = {
@@ -42,10 +41,6 @@ function createMockQuestionService(): QuestionAnsweringService {
   return {
     answer: vi.fn(async () => ({ answer: "mock answer", contextFound: true })),
   } as unknown as QuestionAnsweringService;
-}
-
-function createMockCardService(client: any): SlackIncidentCardService {
-  return new SlackIncidentCardService(client);
 }
 
 function createMockBolt() {
@@ -103,7 +98,6 @@ describe("Slack Handlers - Trigger Layer Integration", () => {
       investigationService: service,
       intentDetector,
       questionService: createMockQuestionService(),
-      cardService: createMockCardService(client),
     };
   }
 
@@ -232,61 +226,13 @@ describe("Slack Handlers - Trigger Layer Integration", () => {
     });
   });
 
-  describe("/runbook start slash command", () => {
-    it("creates investigation via Trigger Layer", async () => {
+  describe("/runbook slash command (removed)", () => {
+    it("registers no /runbook handler", async () => {
       const bolt = createMockBolt();
       registerSlackHandlers(bolt as any, makeDeps());
 
-      const handler = bolt.handlers["command:/runbook"];
-      expect(handler).toBeDefined();
-
-      const command = {
-        ...basicCommand,
-        command: "/runbook",
-        text: "start database connection issues",
-      };
-
-      await handler({ command, ack: vi.fn(), client });
-
-      expect(service.createInvestigation).toHaveBeenCalled();
-      expect(client.chat.postEphemeral).toHaveBeenCalled();
-    });
-
-    it("does not create investigation for non-start subcommands", async () => {
-      const bolt = createMockBolt();
-      registerSlackHandlers(bolt as any, makeDeps());
-
-      const handler = bolt.handlers["command:/runbook"];
-
-      const command = {
-        ...basicCommand,
-        command: "/runbook",
-        text: "search database",
-      };
-
-      await handler({ command, ack: vi.fn(), client });
-
-      expect(service.createInvestigation).not.toHaveBeenCalled();
-    });
-
-    it("behaves exactly like /investigate (no history, no channel, no card)", async () => {
-      const bolt = createMockBolt();
-      registerSlackHandlers(bolt as any, makeDeps());
-
-      const handler = bolt.handlers["command:/runbook"];
-
-      await handler(
-        {
-          command: { ...basicCommand, command: "/runbook", text: "start db issues" },
-          ack: vi.fn(),
-          client,
-        },
-      );
-
-      expect(service.createInvestigation).toHaveBeenCalled();
-      expect(client.conversations.history).not.toHaveBeenCalled();
-      expect(client.conversations.create).not.toHaveBeenCalled();
-      expect(client.pins.add).not.toHaveBeenCalled();
+      expect(bolt.handlers["command:/runbook"]).toBeUndefined();
+      expect(bolt.handlers["command:/investigate"]).toBeDefined();
     });
   });
 
@@ -374,8 +320,8 @@ describe("Slack Handlers - Trigger Layer Integration", () => {
 
       await handler({ event, client });
 
-      const postMessageCalls = (client.chat.postMessage as any).mock.calls;
-      const confirmation = postMessageCalls.find(
+      const ephemeralCalls = (client.chat.postEphemeral as any).mock.calls;
+      const confirmation = ephemeralCalls.find(
         (call: any) =>
           JSON.stringify(call[0].blocks ?? []).includes("Investigation Created"),
       );

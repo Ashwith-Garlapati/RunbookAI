@@ -122,4 +122,28 @@ describe("IncidentCoordinator", () => {
     expect(inc.severity).toBe(IncidentSeverity.Minor);
     expect(published).toContain("incident.created");
   });
+
+  it("links channels with authorization and same-channel idempotency", async () => {
+    const { coord, published } = setup();
+    const inc = await coord.declare({ teamId: "T1", title: "x", reporterId: "U1", correlationId: "c" });
+    await expect(
+      coord.linkChannel({ teamId: "T1", actor: "U1", correlationId: "c" }, inc.id, "C2", "incident-two"),
+    ).rejects.toThrow(/may not perform/);
+    const linked = await coord.linkChannel(
+      { teamId: "T1", actor: "U_cmd", correlationId: "c" },
+      inc.id,
+      "C2",
+      "incident-two",
+    );
+    expect(linked.channelId).toBe("C2");
+    expect(published).toContain("incident.channel_linked");
+    const timelineBefore = linked.timeline.length;
+    const same = await coord.linkChannel(
+      { teamId: "T1", actor: "U_cmd", correlationId: "c" },
+      inc.id,
+      "C2",
+      "incident-two",
+    );
+    expect(same.timeline).toHaveLength(timelineBefore);
+  });
 });

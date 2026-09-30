@@ -6,6 +6,7 @@
  */
 
 import { logger } from "../observability/logger.js";
+import { describeSlackError } from "./slackErrors.js";
 
 export interface ChannelClientLike {
   conversations: {
@@ -37,6 +38,7 @@ export class SlackChannelManager {
   async createIncidentChannel(params: {
     title: string;
     correlationId: string;
+    teamId?: string;
     isPrivate?: boolean;
   }): Promise<{ channelId: string; channelName: string }> {
     const name = buildChannelName(params.title);
@@ -50,6 +52,14 @@ export class SlackChannelManager {
       });
       return { channelId, channelName: result.channel?.name ?? name };
     } catch (error: unknown) {
+      logger.error(
+        "ChannelManager",
+        "ChannelCreateFailed",
+        describeSlackError("conversations.create", error, {
+          ...(params.teamId ? { teamId: params.teamId } : {}),
+          operation: "incident_channel_create",
+        }),
+      );
       if (error instanceof Error && /name_taken/i.test(error.message)) {
         const retry = `${name}-${Math.random().toString(36).slice(2, 6)}`.slice(0, 80);
         const result = await this._client.conversations.create({ name: retry, is_private: params.isPrivate ?? false });
@@ -62,7 +72,12 @@ export class SlackChannelManager {
   }
 
   /** Invites responders; each failure is logged and isolated (never fatal). */
-  async inviteResponders(channelId: string, userIds: string[], correlationId: string): Promise<{ invited: string[]; failed: string[] }> {
+  async inviteResponders(
+    channelId: string,
+    userIds: string[],
+    correlationId: string,
+    teamId?: string,
+  ): Promise<{ invited: string[]; failed: string[] }> {
     const invited: string[] = [];
     const failed: string[] = [];
     for (const userId of userIds) {
@@ -73,9 +88,12 @@ export class SlackChannelManager {
         failed.push(userId);
         logger.warn("ChannelManager", "InviteFailed", {
           correlationId,
-          channelId,
           userId,
-          reason: error instanceof Error ? error.message : String(error),
+          ...describeSlackError("conversations.invite", error, {
+            ...(teamId ? { teamId } : {}),
+            channelId,
+            operation: "incident_invite",
+          }),
         });
       }
     }
