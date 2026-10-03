@@ -5,7 +5,7 @@
 
 import { describe, it, expect, vi } from "vitest";
 
-import { SlackGateway, type GatewayStore } from "../slack/SlackGateway.js";
+import { SlackGateway, startRecoveryLoop, type GatewayStore } from "../slack/SlackGateway.js";
 
 function fakeStore(): GatewayStore & { rows: Map<string, { status: string; attempts: number }> } {
   const rows = new Map<string, { status: string; attempts: number }>();
@@ -97,5 +97,39 @@ describe("durable SlackGateway", () => {
     const run = vi.fn(async () => undefined);
     await gateway.enqueue({ key: "mem-1", run });
     await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(1));
+  });
+
+  it("reclaims previous-process leases on boot recovery only", async () => {
+    const seen: Array<{ includeLeased?: boolean }> = [];
+    const store = fakeStore();
+    const inner = store.claimDue;
+    store.claimDue = async (now, leaseMs, opts) => {
+      seen.push({ ...(opts?.includeLeased ? { includeLeased: true } : {}) });
+      return inner(now, leaseMs, opts);
+    };
+    const gateway = new SlackGateway(
+      { claimDelivery: async () => true },
+      { store, dispatch: async () => undefined },
+    );
+    await gateway.recover({ reclaimLeased: true });
+    expect(seen[0]).toEqual({ includeLeased: true });
+    seen.length = 0;
+    await gateway.recover();
+    for (const call of seen) expect(call).toEqual({});
+  });
+
+  it("sweeps recovery periodically until stopped", async () => {
+    const store = fakeStore();
+    const gateway = new SlackGateway(
+      { claimDelivery: async () => true },
+      { store, dispatch: async () => undefined },
+    );
+    const spy = vi.spyOn(gateway, "recover");
+    const loop = startRecoveryLoop(gateway, 10);
+    await vi.waitFor(() => expect(spy.mock.calls.length).toBeGreaterThanOrEqual(2));
+    const count = spy.mock.calls.length;
+    loop.stop();
+    await new Promise((r) => setTimeout(r, 40));
+    expect(spy.mock.calls.length).toBe(count);
   });
 });

@@ -76,3 +76,16 @@ export class IncidentAuthorizationError extends Error {
     this.operation = operation;
   }
 }
+
+/**
+ * Failures that can never succeed on retry: permission denials and domain
+ * validation failures (same client-error class the API maps to 400).
+ * Job runners must send these straight to terminal handling.
+ */
+const NON_RETRYABLE_MESSAGE = /Invalid|required|Only |Cannot |already|No assignee/i;
+
+export function isNonRetryable(error: unknown): boolean {
+  if (error instanceof IncidentAuthorizationError) return true;
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return NON_RETRYABLE_MESSAGE.test(message);
+}

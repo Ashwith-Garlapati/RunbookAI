@@ -11,6 +11,7 @@
  */
 
 import { newCorrelationId, logger } from "../observability/logger.js";
+import { isNonRetryable } from "../domains/incident/IncidentPermissions.js";
 import type { TeamId } from "../domains/incident/types.js";
 
 export interface NormalizedSlackEnvelope {
@@ -50,7 +51,7 @@ export interface GatewayStore {
   complete(key: string): Promise<void>;
   reschedule(key: string, attempts: number, notBefore: Date, error: string): Promise<void>;
   failTerminal(key: string, attempts: number, error: string): Promise<void>;
-  claimDue(now: Date, leaseMs: number): Promise<{
+  claimDue(now: Date, leaseMs: number, opts?: { includeLeased?: boolean }): Promise<{
     key: string;
     op: string;
     teamId: string;
@@ -171,16 +172,22 @@ export class SlackGateway {
   }
 
   /**
-   * Boot recovery: claims every due persisted job and dispatches it.
+   * Recovery: claims every due persisted job and dispatches it.
    * At-least-once: replayed jobs rely on idempotency keys + state guards in
    * the job implementations to converge without duplicates.
+   *
+   * Pass `reclaimLeased: true` once at boot: the previous process is dead,
+   * so its unexpired leases are reclaimed immediately instead of waiting
+   * out the lease. Steady-state sweeps omit it and only pick up jobs past
+   * their rescheduled notBefore or with expired leases.
    */
-  async recover(): Promise<void> {
+  async recover(opts?: { reclaimLeased?: boolean }): Promise<void> {
     if (!this._store || !this._dispatch) return;
+    const claimOpts = opts?.reclaimLeased ? { includeLeased: true } : undefined;
     for (;;) {
       let claimed: Awaited<ReturnType<GatewayStore["claimDue"]>>;
       try {
-        claimed = await this._store.claimDue(new Date(), this._leaseMs);
+        claimed = await this._store.claimDue(new Date(), this._leaseMs, claimOpts);
       } catch (error) {
         logger.error("SlackGateway", "RecoverClaimFailed", {
           reason: error instanceof Error ? error.message : String(error),
@@ -196,7 +203,7 @@ export class SlackGateway {
         const reason = error instanceof Error ? error.message : String(error);
         const attempts = claimed.attempts + 1;
         try {
-          if (attempts < this._maxAttempts) {
+          if (!isNonRetryable(error) && attempts < this._maxAttempts) {
             const delay = computeBackoff(attempts, isRateLimit(error));
             await this._store.reschedule(claimed.key, attempts, new Date(Date.now() + delay), reason);
           } else {
@@ -240,7 +247,8 @@ export class SlackGateway {
       }
     } catch (error) {
       const retryAfterMs = isRateLimit(error);
-      if (attempt < this._maxAttempts) {
+      // Permission denials and validation failures never heal — terminal now.
+      if (!isNonRetryable(error) && attempt < this._maxAttempts) {
         const delay = computeBackoff(attempt, retryAfterMs);
         logger.warn("SlackGateway", "JobRetry", { jobKey: job.key, attempt, delayMs: delay });
         await new Promise((r) => setTimeout(r, delay));
@@ -260,4 +268,26 @@ export class SlackGateway {
       });
     }
   }
+}
+
+/**
+ * Periodic recovery sweeps: picks up jobs rescheduled with a future
+ * notBefore and jobs orphaned by crashes (expired leases) that a single
+ * boot-time recover() would miss. Failures are isolated per sweep; the
+ * loop never throws. Boot should still call recover({ reclaimLeased: true })
+ * once first to reclaim the previous process's unexpired leases.
+ */
+export function startRecoveryLoop(gateway: SlackGateway, intervalMs = 30_000): { stop(): void } {
+  const sweep = async (): Promise<void> => {
+    try {
+      await gateway.recover();
+    } catch (error) {
+      logger.warn("SlackGateway", "RecoverySweepFailed", {
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+  void sweep();
+  const timer = setInterval(() => void sweep(), intervalMs);
+  return { stop: () => clearInterval(timer) };
 }

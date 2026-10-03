@@ -13,6 +13,16 @@ function toDomain(doc: IEvidenceDoc): EvidenceItem {
     reference: doc.reference,
     collectedAt: doc.collectedAt,
     metadata: doc.metadata,
+    ...(doc.teamId ? { teamId: doc.teamId } : {}),
+    ...(doc.incidentId ? { incidentId: doc.incidentId } : {}),
+    ...(doc.title ? { title: doc.title } : {}),
+    ...(doc.content !== undefined ? { content: doc.content } : {}),
+    ...(doc.searchableText !== undefined ? { searchableText: doc.searchableText } : {}),
+    ...(doc.occurredAt ? { occurredAt: doc.occurredAt } : {}),
+    ...(doc.provenance ? { provenance: { ...doc.provenance } } : {}),
+    // Legacy rows predate sourceId — reference has always been the stable key.
+    ...(doc.sourceId || doc.reference ? { sourceId: (doc.sourceId ?? doc.reference) as string } : {}),
+    ...(doc.hash ? { hash: doc.hash } : {}),
   });
 }
 
@@ -26,6 +36,15 @@ export class MongoEvidenceRepository implements IEvidenceRepository {
       reference: evidence.reference,
       collectedAt: evidence.collectedAt,
       metadata: evidence.metadata,
+      ...(evidence.teamId ? { teamId: evidence.teamId } : {}),
+      ...(evidence.incidentId ? { incidentId: evidence.incidentId } : {}),
+      ...(evidence.title ? { title: evidence.title } : {}),
+      ...(evidence.content !== undefined ? { content: evidence.content } : {}),
+      ...(evidence.searchableText !== undefined ? { searchableText: evidence.searchableText } : {}),
+      ...(evidence.occurredAt ? { occurredAt: evidence.occurredAt } : {}),
+      ...(evidence.provenance ? { provenance: { ...evidence.provenance } } : {}),
+      ...(evidence.sourceId ? { sourceId: evidence.sourceId } : {}),
+      ...(evidence.hash ? { hash: evidence.hash } : {}),
     });
     await doc.save();
   }

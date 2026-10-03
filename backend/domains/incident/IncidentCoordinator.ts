@@ -29,7 +29,7 @@ import type {
   IIdempotencyStore,
   IMembershipResolver,
 } from "./IncidentRepository.js";
-import { IncidentVersionConflictError } from "./IncidentRepository.js";
+import { IncidentVersionConflictError, IncidentChannelConflictError } from "./IncidentRepository.js";
 import { IncidentBus } from "./IncidentBus.js";
 import {
   canPerform,
@@ -148,7 +148,22 @@ export class IncidentCoordinator {
     // we held old state) reload once and revalidate instead of failing.
     for (let attempt = 1; ; attempt += 1) {
       const target = attempt === 1 ? incident : await this.load(incidentId);
-      if (attempt > 1) this.ensureTeam(target.teamId, ctx.teamId);
+      if (attempt > 1) {
+        this.ensureTeam(target.teamId, ctx.teamId);
+        // Membership may have changed while we held stale state — re-resolve
+        // against the fresh snapshot and re-check before retrying.
+        const retryLevel = await this._membership.resolveLevel(ctx.teamId, ctx.actor, target);
+        if (!canPerform(retryLevel, op)) {
+          logger.warn("Coordinator", "Unauthorized", {
+            correlationId: ctx.correlationId,
+            incidentId,
+            op,
+            userId: ctx.actor,
+            level: retryLevel,
+          });
+          throw new IncidentAuthorizationError(op, retryLevel);
+        }
+      }
       try {
         await fn(target);
       } catch (error) {
@@ -214,6 +229,10 @@ export class IncidentCoordinator {
     if (current.channelId === channelId) {
       return current;
     }
+    const owner = await this._repo.findByTeamAndChannel(ctx.teamId, channelId);
+    if (owner && owner.id !== incidentId) {
+      throw new IncidentChannelConflictError(channelId, owner.id);
+    }
     return this.mutate(ctx, "link_channel", incidentId, (i) =>
       i.relinkChannel(ctx.actor, channelId, channelName),
     );
@@ -248,7 +267,14 @@ export class IncidentCoordinator {
     if (!canAssignRole(level, role, occupied)) {
       throw new IncidentAuthorizationError("assign_role", level);
     }
-    return this.mutate(ctx, "assign_role", incidentId, (i) => i.assignRole(ctx.actor, role, assignee));
+    return this.mutate(ctx, "assign_role", incidentId, (i) => {
+      // Revalidate against the live target on every attempt: the seat may
+      // have filled concurrently while we held stale state.
+      if (!canAssignRole(level, role, (i.currentRoles[role] ?? null) !== null)) {
+        throw new IncidentAuthorizationError("assign_role", level);
+      }
+      i.assignRole(ctx.actor, role, assignee);
+    });
   }
 
   async unassignRole(ctx: CoordinatorContext, incidentId: IncidentId, role: IncidentRole): Promise<Incident> {
@@ -288,6 +314,16 @@ export class IncidentCoordinator {
         if (!(error instanceof IncidentVersionConflictError) || attempt >= 2) throw error;
         const fresh = await this.load(incidentId);
         if (fresh.assignmentState(role) === "active") return fresh;
+        // The seat may have been reassigned while we held stale state — only
+        // the current assignee (or commander+) may acknowledge the retry.
+        const freshAssignee = fresh.currentRoles[role] ?? null;
+        if (!freshAssignee) throw new Error(`No assignee for role ${role}`);
+        if (ctx.actor !== freshAssignee) {
+          const retryLevel = await this._membership.resolveLevel(ctx.teamId, ctx.actor, fresh);
+          if (!levelAtLeast(retryLevel, MembershipLevel.Commander)) {
+            throw new IncidentAuthorizationError("acknowledge", retryLevel);
+          }
+        }
         fresh.acknowledgeRole(ctx.actor, role);
         await this._repo.update(fresh);
         await this._bus.publishAll(fresh.pullEvents());

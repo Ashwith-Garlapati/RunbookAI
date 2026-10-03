@@ -27,6 +27,14 @@ function getOctokit(): Octokit {
 export function isGitHubEnabled(): boolean {
     return Boolean(process.env.GITHUB_TOKEN);
 }
+
+/**
+ * Shared lazy client for all GitHub evidence/publish flows.
+ * Same singleton + same GITHUB_TOKEN auth — not a second client.
+ */
+export function getSharedGitHubClient(): Octokit {
+    return getOctokit();
+}
 const toFileName = (title: string): string => {
     const sanitized = title
         .toLowerCase()

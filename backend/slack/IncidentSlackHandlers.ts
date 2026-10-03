@@ -13,19 +13,14 @@ import type { App } from "@slack/bolt";
 import type { IncidentCoordinator, CoordinatorContext } from "../domains/incident/IncidentCoordinator.js";
 import type { IMembershipResolver } from "../domains/incident/IncidentRepository.js";
 import { IncidentAuthorizationError } from "../domains/incident/IncidentPermissions.js";
-import { IncidentStatus, incidentStatusLabel } from "../domains/incident/IncidentStatus.js";
 import { parseSeverity } from "../domains/incident/IncidentSeverity.js";
-import { parseRole, IncidentRole } from "../domains/incident/IncidentRoles.js";
 import { SlackGateway } from "./SlackGateway.js";
-import type { IncidentJobOp } from "./incidentJobs.js";
-import { SlackChannelManager, type ChannelClientLike } from "./SlackChannelManager.js";
+import { runIncidentJob, type IncidentJobContext, type IncidentJobDescriptor, type IncidentJobOp } from "./incidentJobs.js";
+import type { AnyClient as JobClient } from "./incidentJobShared.js";
 import {
   CONTROL_ACTIONS,
-  buildControlBlocks,
-  buildUpdateBlocks,
   buildTimelineBlocks,
   buildIncidentDetailsBlocks,
-  controlMessageText,
 } from "./SlackControlMessage.js";
 import {
   MODAL_CALLBACKS,
@@ -47,6 +42,8 @@ export interface IncidentSlackDeps {
   coordinator: IncidentCoordinator;
   gateway: SlackGateway;
   membership: IMembershipResolver;
+  /** Shared job runner context (live runs and replays execute the same code). */
+  jobs: IncidentJobContext;
   /** Resolves the team-configured default commander, if any. */
   resolveDefaultCommander?: (teamId: string) => Promise<string | null>;
 }
@@ -62,25 +59,6 @@ type AnyClient = {
     replies(args: Record<string, unknown>): Promise<{ messages?: Array<Record<string, unknown>> }>;
   };
 };
-
-async function refreshControl(client: AnyClient, deps: IncidentSlackDeps, incidentId: string, teamId: string): Promise<void> {
-  try {
-    const incident = await deps.coordinator.get(incidentId, teamId);
-    if (!incident.channelId || !incident.controlMessageTs) return;
-    await client.chat.update({
-      channel: incident.channelId,
-      ts: incident.controlMessageTs,
-      text: controlMessageText(incident),
-      blocks: buildControlBlocks(incident),
-    });
-  } catch (error) {
-    logger.warn("IncidentSlack", "ControlRefreshFailed", {
-      incidentId,
-      reason: error instanceof Error ? error.message : String(error),
-      slackError: slackErrorCode(error),
-    });
-  }
-}
 
 async function ephemeral(client: AnyClient, channel: string, user: string, text: string, threadTs?: string): Promise<void> {
   try {
@@ -120,9 +98,17 @@ function ctxFor(teamId: string, actor: string, idempotencyKey?: string): Coordin
   };
 }
 
-/** Resolved, closed, or cancelled — the incident is no longer active. */
-function isOpenStatus(status: IncidentStatus): boolean {
-  return status !== IncidentStatus.Resolved && status !== IncidentStatus.Closed && status !== IncidentStatus.Cancelled;
+/**
+ * Enqueues one durable job shared by the live run and any crash replay:
+ * the same key + descriptor drives both, so idempotency keys, error
+ * handling, and teamId propagation can never diverge.
+ */
+function enqueueIncidentJob(deps: IncidentSlackDeps, client: unknown, job: IncidentJobDescriptor): void {
+  deps.gateway.enqueue({
+    key: job.key,
+    durable: { op: job.op, teamId: job.teamId, params: job.params },
+    run: () => runIncidentJob(deps.jobs, job, client as JobClient),
+  });
 }
 
 export function registerIncidentSlackHandlers(bolt: App, deps: IncidentSlackDeps): void {
@@ -232,14 +218,13 @@ function registerIncCommand(bolt: App, deps: IncidentSlackDeps): void {
             await ephemeral(c, channelId, userId, "No incident is linked to this channel.");
             return;
           }
-          deps.gateway.enqueue({
+          const job: IncidentJobDescriptor = {
             key: `close:${incident.id}:${command.trigger_id}`,
-            durable: { op: "close", teamId, params: { incidentId: incident.id, userId } },
-            run: async () => {
-              await deps.coordinator.close(ctxFor(teamId, userId, `close:${command.trigger_id}`), incident.id);
-              await refreshControl(c, deps, incident.id, teamId);
-            },
-          });
+            op: "close",
+            teamId,
+            params: { incidentId: incident.id, userId },
+          };
+          enqueueIncidentJob(deps, c, job);
           await ephemeral(c, channelId, userId, "Closing incident…");
           return;
         }
@@ -254,14 +239,13 @@ function registerIncCommand(bolt: App, deps: IncidentSlackDeps): void {
             await ephemeral(c, channelId, userId, "Usage: `/inc rename <new title>`");
             return;
           }
-          deps.gateway.enqueue({
+          const job: IncidentJobDescriptor = {
             key: `rename:${incident.id}:${command.trigger_id}`,
-            durable: { op: "rename", teamId, params: { incidentId: incident.id, userId, title } },
-            run: async () => {
-              await deps.coordinator.rename(ctxFor(teamId, userId, `rename:${command.trigger_id}`), incident.id, title);
-              await refreshControl(c, deps, incident.id, teamId);
-            },
-          });
+            op: "rename",
+            teamId,
+            params: { incidentId: incident.id, userId, title },
+          };
+          enqueueIncidentJob(deps, c, job);
           await ephemeral(c, channelId, userId, "Renaming incident…");
           return;
         }
@@ -271,49 +255,13 @@ function registerIncCommand(bolt: App, deps: IncidentSlackDeps): void {
             await ephemeral(c, channelId, userId, "Usage: `/inc link <incident-id>`");
             return;
           }
-          deps.gateway.enqueue({
+          const job: IncidentJobDescriptor = {
             key: `link:${targetId}:${channelId}:${command.trigger_id}`,
-            durable: {
-              op: "link",
-              teamId,
-              params: { incidentId: targetId, targetId, userId, channelId, channelName: command.channel_name ?? channelId },
-            },
-            run: async () => {
-              try {
-                const linked = await deps.coordinator.linkChannel(
-                  ctxFor(teamId, userId, `link:${command.trigger_id}`),
-                  targetId,
-                  channelId,
-                  command.channel_name ?? channelId,
-                );
-                const posted = await c.chat.postMessage({
-                  channel: channelId,
-                  text: controlMessageText(linked),
-                  blocks: buildControlBlocks(linked),
-                });
-                if (posted.ts) {
-                  await deps.coordinator.setControlMessage(linked.id, teamId, posted.ts);
-                }
-              } catch (error) {
-                logger.warn("IncidentSlack", "LinkFailed", {
-                  correlationId,
-                  reason: error instanceof Error ? error.message : String(error),
-                  slackError: slackErrorCode(error),
-                });
-                const message = error instanceof Error ? error.message : "";
-                await ephemeral(
-                  c,
-                  channelId,
-                  userId,
-                  /not found|different workspace/i.test(message)
-                    ? `I couldn't find incident \`${targetId}\` in this workspace. Check the ID and try again.`
-                    : error instanceof IncidentAuthorizationError
-                      ? "You are not permitted to link incidents."
-                      : "Could not link the incident. Please try again.",
-                );
-              }
-            },
-          });
+            op: "link",
+            teamId,
+            params: { incidentId: targetId, targetId, userId, channelId, channelName: command.channel_name ?? channelId },
+          };
+          enqueueIncidentJob(deps, c, job);
           await ephemeral(c, channelId, userId, "Linking incident to this channel…");
           return;
         }
@@ -436,42 +384,13 @@ function registerControlActions(bolt: App, deps: IncidentSlackDeps): void {
     const incidentId = b.actions?.[0]?.value ?? "";
     const triggerId = b.trigger_id ?? "";
     if (!teamId || !userId || !incidentId) return;
-    deps.gateway.enqueue({
+    const job: IncidentJobDescriptor = {
       key: `accept:${incidentId}:${userId}:${triggerId}`,
-      durable: { op: "accept", teamId, params: { incidentId, userId } },
-      run: async () => {
-        try {
-          await deps.coordinator.acknowledgeRole(
-            ctxFor(teamId, userId),
-            incidentId,
-            IncidentRole.IncidentCommander,
-          );
-          await refreshControl(c, deps, incidentId, teamId);
-        } catch (error) {
-          logger.warn("IncidentSlack", "AcceptFailed", {
-            incidentId,
-            reason: error instanceof Error ? error.message : String(error),
-            slackError: slackErrorCode(error),
-          });
-          await refreshControl(c, deps, incidentId, teamId);
-          try {
-            const reason = error instanceof Error ? error.message : String(error);
-            const text =
-              error instanceof IncidentAuthorizationError
-                ? "You are not permitted to accept this incident."
-                : `Could not accept the incident (${reason}). Please try again.`;
-            const incident = await deps.coordinator.get(incidentId, teamId);
-            if (incident.channelId) {
-              await ephemeral(c, incident.channelId, userId, text);
-            } else {
-              await c.chat.postMessage({ channel: userId, text });
-            }
-          } catch {
-            // Best effort — never fail the job on a notification.
-          }
-        }
-      },
-    });
+      op: "accept",
+      teamId,
+      params: { incidentId, userId },
+    };
+    enqueueIncidentJob(deps, c, job);
   });
 
   bolt.action(CONTROL_ACTIONS.timeline, async ({ ack, body, client }) => {
@@ -518,22 +437,13 @@ function registerControlActions(bolt: App, deps: IncidentSlackDeps): void {
     const userId = b.user?.id ?? "";
     const incidentId = b.actions?.[0]?.value ?? "";
     if (!teamId || !userId || !incidentId) return;
-    deps.gateway.enqueue({
+    const job: IncidentJobDescriptor = {
       key: `close:${incidentId}:${userId}:${b.trigger_id ?? "manual"}`,
-      durable: { op: "close", teamId, params: { incidentId, userId } },
-      run: async () => {
-        try {
-          await deps.coordinator.close(ctxFor(teamId, userId), incidentId);
-          await refreshControl(c, deps, incidentId, teamId);
-        } catch (error) {
-          logger.warn("IncidentSlack", "CloseFailed", {
-            incidentId,
-            reason: error instanceof Error ? error.message : String(error),
-            slackError: slackErrorCode(error),
-          });
-        }
-      },
-    });
+      op: "close",
+      teamId,
+      params: { incidentId, userId },
+    };
+    enqueueIncidentJob(deps, c, job);
   });
 }
 
@@ -595,108 +505,26 @@ function registerViewSubmissions(bolt: App, deps: IncidentSlackDeps): void {
     const severity = parseSeverity(severityRaw) ?? undefined;
     const idempotencyKey = `declare:${teamId}:${userId}:${view.id}`;
 
-    deps.gateway.enqueue({
+    const job: IncidentJobDescriptor = {
       key: idempotencyKey,
-      durable: {
-        op: "declare",
-        teamId,
-        params: {
-          title,
-          description,
-          ...(severity ? { severity } : {}),
-          service,
-          userId,
-          originChannelId: (meta.originChannelId as string | undefined) ?? null,
-          originMessageTs: (meta.originMessageTs as string | undefined) ?? null,
-          idempotencyKey,
-        },
+      op: "declare",
+      teamId,
+      params: {
+        title,
+        description,
+        ...(severity ? { severity } : {}),
+        service,
+        userId,
+        originChannelId: (meta.originChannelId as string | undefined) ?? null,
+        originMessageTs: (meta.originMessageTs as string | undefined) ?? null,
+        idempotencyKey,
       },
-      run: async () => {
-        try {
-          // Provisional commander: team-configured default, else the reporter.
-          // Assigned atomically inside declare; the DM goes out via the
-          // role_assigned event even before the channel exists.
-          const defaultCommander = await deps.resolveDefaultCommander?.(teamId).catch(() => null);
-          const incident = await deps.coordinator.declare({
-            teamId,
-            title,
-            description,
-            incidentType: "operational",
-            affectedService: service,
-            ...(severity ? { severity } : {}),
-            reporterId: userId,
-            originChannelId: (meta.originChannelId as string | undefined) ?? null,
-            originMessageTs: (meta.originMessageTs as string | undefined) ?? null,
-            idempotencyKey,
-            correlationId: newCorrelationId(),
-            defaultCommanderId: defaultCommander ?? userId,
-          });
-
-          // Create + wire the incident channel. The manager is built from the
-          // per-event authorized client: the startup-global bolt.client
-          // carries no token under Socket Mode (custom authorize) and every
-          // call made with it fails with not_authed.
-          const jobChannels = new SlackChannelManager(c as unknown as ChannelClientLike);
-          const { channelId, channelName } = await jobChannels.createIncidentChannel({
-            title: incident.title,
-            correlationId: newCorrelationId(),
-          });
-          await deps.coordinator.attachChannel(ctxFor(teamId, userId), incident.id, channelId, channelName, null);
-          const leads = incident.currentRoles[IncidentRole.IncidentCommander] ? [incident.currentRoles[IncidentRole.IncidentCommander]] : [];
-          await jobChannels.inviteResponders(channelId, [...new Set([userId, ...leads])], newCorrelationId());
-
-          const full = await deps.coordinator.get(incident.id, teamId);
-          const posted = await c.chat.postMessage({
-            channel: channelId,
-            text: controlMessageText(full),
-            blocks: buildControlBlocks(full),
-          });
-          if (posted.ts) {
-            await deps.coordinator.setControlMessage(incident.id, teamId, posted.ts);
-            const permalink = await jobChannels.getPermalink(channelId, posted.ts);
-            if (permalink) {
-              await deps.coordinator.attachChannel(ctxFor(teamId, userId), incident.id, channelId, channelName, permalink);
-            }
-          }
-          logger.info("IncidentSlack", "DeclaredWithChannel", { incidentId: incident.id, channelId });
-        } catch (error) {
-          const reason = error instanceof Error ? error.message : String(error);
-          logger.error("IncidentSlack", "DeclareFailed", { reason });
-          // not_authed = stored workspace token is dead (app reinstalled or
-          // scopes changed without reinstall). The incident record exists;
-          // only Slack wiring failed — tell the reporter how to recover.
-          if (/not_authed|invalid_auth|token_revoked|account_inactive/i.test(reason)) {
-            const originChannelId = meta.originChannelId as string | undefined;
-            if (originChannelId) {
-              try {
-                await c.chat.postEphemeral({
-                  channel: originChannelId,
-                  user: userId,
-                  text:
-                    "⚠️ Incident was recorded, but I could not create the incident channel: " +
-                    "Slack rejected my workspace token. Please reinstall the RunbookAI app " +
-                    "to this workspace, then `/inc` again.",
-                });
-              } catch {
-                // Best effort — never fail the job on a notification.
-              }
-            }
-          }
-        }
-      },
-    });
+    };
+    enqueueIncidentJob(deps, c, job);
   });
 
   const simpleModal = (
     callbackId: string,
-    handler: (
-      coord: IncidentCoordinator,
-      incidentId: string,
-      teamId: string,
-      userId: string,
-      state: ViewState,
-      notify: (text: string) => Promise<void>,
-    ) => Promise<void>,
     describe: (
       incidentId: string,
       teamId: string,
@@ -714,76 +542,17 @@ function registerViewSubmissions(bolt: App, deps: IncidentSlackDeps): void {
       if (!teamId || !userId || !incidentId) return;
       const state = view.state.values as unknown as ViewState;
       const { op, params } = describe(incidentId, teamId, userId, state);
-      deps.gateway.enqueue({
+      const job: IncidentJobDescriptor = {
         key: `${callbackId}:${view.id}`,
-        durable: { op, teamId, params: { incidentId, userId, ...params } },
-        run: async () => {
-          try {
-            // Best-effort user feedback for background modal work. Posts in
-            // the incident channel; silently skips when there is none.
-            const notify = async (text: string): Promise<void> => {
-              try {
-                const incident = await deps.coordinator.get(incidentId, teamId);
-                if (!incident.channelId) return;
-                await c.chat.postEphemeral({ channel: incident.channelId, user: userId, text });
-              } catch {
-                // Never fail the job on a notification.
-              }
-            };
-            await handler(deps.coordinator, incidentId, teamId, userId, state, notify);
-          } catch (error) {
-            logger.warn("IncidentSlack", "ModalFailed", {
-              callbackId,
-              incidentId,
-              reason: error instanceof Error ? error.message : String(error),
-              slackError: slackErrorCode(error),
-            });
-          }
-        },
-      });
+        op,
+        teamId,
+        params: { incidentId, userId, ...params },
+      };
+      enqueueIncidentJob(deps, c, job);
     });
   };
 
-  simpleModal(MODAL_CALLBACKS.update, async (coord, incidentId, teamId, userId, state, notify) => {
-    const ctx = ctxFor(teamId, userId, `update:${incidentId}:${Date.now()}`);
-    const before = await coord.get(incidentId, teamId);
-    // Closed/Cancelled = workflow complete: updates here are a mistake
-    // (usually the wrong channel), so block instead of recording.
-    if (before.status === IncidentStatus.Closed || before.status === IncidentStatus.Cancelled) {
-      await notify(
-        `This incident is *${incidentStatusLabel(before.status)}* — updates are disabled. Reopen a new incident with \`/inc\` if the issue is back.`,
-      );
-      return;
-    }
-    const wasResolved = !isOpenStatus(before.status);
-    const nextIn = val(state, "b_next_in", "next_in");
-    const nextUpdateInMinutes = nextIn ? Number(nextIn) : null;
-    await coord.postUpdate(ctx, incidentId, {
-      text: rval(state, "b_chg", "changed"),
-      ...(nextUpdateInMinutes !== null && Number.isFinite(nextUpdateInMinutes)
-        ? { nextUpdateInMinutes }
-        : {}),
-    });
-    // Required dropdowns — skip only when the value is already current
-    // (re-setting the same status is an invalid transition).
-    const current = await coord.get(incidentId, teamId);
-    const severity = parseSeverity(val(state, "b_sev", "severity"));
-    if (severity && severity !== current.severity) {
-      await coord.setSeverity(ctxFor(teamId, userId), incidentId, severity);
-    }
-    const statusRaw = val(state, "b_status", "status").toLowerCase();
-    if (statusRaw && (Object.values(IncidentStatus) as string[]).includes(statusRaw) && statusRaw !== current.status) {
-      await coord.changeStatus(ctxFor(teamId, userId), incidentId, statusRaw as IncidentStatus);
-    }
-    // Surface it when the update landed on an already-resolved incident.
-    if (wasResolved) {
-      const by = before.resolution ? ` by <@${before.resolution.resolvedBy}>` : "";
-      await notify(
-        `Heads up: this incident was already *${incidentStatusLabel(before.status)}*${by}. Your update was still recorded.`,
-      );
-    }
-  },
-  (_incidentId, _teamId, _userId, state) => ({
+  simpleModal(MODAL_CALLBACKS.update, (_incidentId, _teamId, _userId, state) => ({
     op: "update",
     params: {
       text: rval(state, "b_chg", "changed"),
@@ -793,25 +562,12 @@ function registerViewSubmissions(bolt: App, deps: IncidentSlackDeps): void {
     },
   }));
 
-  simpleModal(MODAL_CALLBACKS.role, async (coord, incidentId, teamId, userId, state) => {
-    const role = parseRole(val(state, "b_role", "role"));
-    const assignee = val(state, "b_user", "assignee");
-    if (!role || !assignee) throw new Error("Role and assignee are required");
-    await coord.assignRole(ctxFor(teamId, userId), incidentId, role, assignee);
-  },
-  (_incidentId, _teamId, _userId, state) => ({
+  simpleModal(MODAL_CALLBACKS.role, (_incidentId, _teamId, _userId, state) => ({
     op: "role",
     params: { role: val(state, "b_role", "role"), assignee: val(state, "b_user", "assignee") },
   }));
 
-  simpleModal(MODAL_CALLBACKS.action, async (coord, incidentId, teamId, userId, state) => {
-    await coord.createAction(ctxFor(teamId, userId), incidentId, {
-      title: val(state, "b_title", "title"),
-      description: rval(state, "b_desc", "desc"),
-      assignee: val(state, "b_assignee", "assignee") || null,
-    });
-  },
-  (_incidentId, _teamId, _userId, state) => ({
+  simpleModal(MODAL_CALLBACKS.action, (_incidentId, _teamId, _userId, state) => ({
     op: "action",
     params: {
       title: val(state, "b_title", "title"),
@@ -820,62 +576,27 @@ function registerViewSubmissions(bolt: App, deps: IncidentSlackDeps): void {
     },
   }));
 
-  simpleModal(MODAL_CALLBACKS.followup, async (coord, incidentId, teamId, userId, state) => {
-    await coord.createFollowUp(ctxFor(teamId, userId), incidentId, {
-      title: val(state, "b_title", "title"),
-      description: rval(state, "b_desc", "desc"),
-    });
-  },
-  (_incidentId, _teamId, _userId, state) => ({
+  simpleModal(MODAL_CALLBACKS.followup, (_incidentId, _teamId, _userId, state) => ({
     op: "followup",
     params: { title: val(state, "b_title", "title"), description: rval(state, "b_desc", "desc") },
   }));
 
-  simpleModal(MODAL_CALLBACKS.escalate, async (coord, incidentId, teamId, userId, state) => {
-    const targets = usersVal(state, "b_user", "to_user");
-    if (targets.length === 0) throw new Error("Select at least one person to escalate to");
-    const reason = rval(state, "b_reason", "reason");
-    if (!reason.trim()) throw new Error("Escalation reason is required");
-    // One escalation record per person: independent timeline/audit/notify each.
-    for (const toUser of targets) {
-      await coord.escalate(ctxFor(teamId, userId), incidentId, toUser, reason);
-    }
-  },
-  (_incidentId, _teamId, _userId, state) => ({
+  simpleModal(MODAL_CALLBACKS.escalate, (_incidentId, _teamId, _userId, state) => ({
     op: "escalate",
     params: { targets: usersVal(state, "b_user", "to_user"), reason: rval(state, "b_reason", "reason") },
   }));
 
-  simpleModal(MODAL_CALLBACKS.handover, async (coord, incidentId, teamId, userId, state) => {
-    await coord.handover(ctxFor(teamId, userId), incidentId, val(state, "b_user", "new_commander"));
-  },
-  (_incidentId, _teamId, _userId, state) => ({
+  simpleModal(MODAL_CALLBACKS.handover, (_incidentId, _teamId, _userId, state) => ({
     op: "handover",
     params: { newCommander: val(state, "b_user", "new_commander") },
   }));
 
-  simpleModal(MODAL_CALLBACKS.resolve, async (coord, incidentId, teamId, userId, state, notify) => {
-    const before = await coord.get(incidentId, teamId);
-    if (before.status === IncidentStatus.Resolved) {
-      await notify(
-        `This incident is already *Resolved*${before.resolution ? ` by <@${before.resolution.resolvedBy}>` : ""}. Nothing changed — close it with \`/inc close\` when the workflow is complete.`,
-      );
-      return;
-    }
-    await coord.resolve(ctxFor(teamId, userId), incidentId, {
-      summary: rval(state, "b_summary", "summary"),
-      mitigation: rval(state, "b_mitigation", "mitigation"),
-    });
-  },
-  (_incidentId, _teamId, _userId, state) => ({
+  simpleModal(MODAL_CALLBACKS.resolve, (_incidentId, _teamId, _userId, state) => ({
     op: "resolve",
     params: { summary: rval(state, "b_summary", "summary"), mitigation: rval(state, "b_mitigation", "mitigation") },
   }));
 
-  simpleModal(MODAL_CALLBACKS.cancel, async (coord, incidentId, teamId, userId, state) => {
-    await coord.cancel(ctxFor(teamId, userId), incidentId, rval(state, "b_reason", "reason"));
-  },
-  (_incidentId, _teamId, _userId, state) => ({
+  simpleModal(MODAL_CALLBACKS.cancel, (_incidentId, _teamId, _userId, state) => ({
     op: "cancel",
     params: { reason: rval(state, "b_reason", "reason") },
   }));

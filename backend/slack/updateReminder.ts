@@ -33,12 +33,27 @@ export function startUpdateReminderLoop(deps: UpdateReminderDeps): { stop(): voi
           if (!incident.nextUpdateAt || incident.nextUpdateAt.getTime() > now.getTime()) continue;
           if (!incident.channelId) {
             incident.markReminderSent(now);
-            await deps.incidentRepo.update(incident);
+            try {
+              await deps.incidentRepo.update(incident);
+            } catch (error) {
+              logger.warn("UpdateReminder", "ClearScheduleFailed", {
+                incidentId: incident.id,
+                reason: error instanceof Error ? error.message : String(error),
+              });
+            }
             continue;
           }
           const target = incident.nextUpdateFor;
           incident.markReminderSent(now);
-          await deps.incidentRepo.update(incident);
+          try {
+            await deps.incidentRepo.update(incident);
+          } catch (error) {
+            logger.warn("UpdateReminder", "ClearScheduleFailed", {
+              incidentId: incident.id,
+              reason: error instanceof Error ? error.message : String(error),
+            });
+            continue;
+          }
           try {
             const slack = await deps.clients.forTeam(teamId);
             await slack.chat.postMessage({

@@ -48,8 +48,11 @@ import { IncidentBus } from "./domains/incident/IncidentBus.js";
 import { IncidentCoordinator } from "./domains/incident/IncidentCoordinator.js";
 import { DefaultMembershipResolver } from "./domains/incident/IncidentRepository.js";
 import { MongoIncidentRepository, MongoIdempotencyStore } from "./infrastructure/MongoIncidentRepository.js";
-import { SlackGateway } from "./slack/SlackGateway.js";
+import { SlackGateway, startRecoveryLoop } from "./slack/SlackGateway.js";
 import { registerIncidentSlackHandlers } from "./slack/IncidentSlackHandlers.js";
+import { registerSlackEvidenceIngest } from "./slack/slackEvidenceIngest.js";
+import { CommonEvidenceStore } from "./services/commonEvidenceStore.js";
+import { MongoEvidenceRepository } from "./infrastructure/MongoEvidenceRepository.js";
 import { IncidentAuditHandler, IncidentNotifier } from "./handlers/IncidentTimelineHandler.js";
 import { createSlackClientProvider } from "./slack/slackClientProvider.js";
 import { createIncidentsRouter } from "./api/incidents.routes.js";
@@ -380,19 +383,31 @@ const start = async () => {
     registerIncidentSlackHandlers(bolt, {
         coordinator,
         gateway: incidentGateway,
+        jobs: incidentJobCtx,
         membership,
         resolveDefaultCommander,
+    });
+
+    // Slack evidence live ingest (same Bolt app, channel-scoped, investigation-gated).
+    registerSlackEvidenceIngest(bolt, {
+        gateway: incidentGateway,
+        coordinator,
+        store: new CommonEvidenceStore(new MongoEvidenceRepository()),
+        clients: slackClients,
     });
 
     app.use("/api/incidents", createIncidentsRouter({ coordinator }));
     app.use("/api/team", createTeamConfigRouter({ membership }));
 
-    // Crash recovery BEFORE accepting traffic: replay persisted jobs that
-    // never completed. Handlers stay idempotent so replays converge.
-    await incidentGateway.recover().catch((e) => {
+    // Crash recovery BEFORE accepting traffic: reclaim the previous
+    // process's leases immediately, then sweep periodically for jobs
+    // rescheduled with a future notBefore or orphaned by later crashes.
+    // Handlers stay idempotent so replays converge.
+    await incidentGateway.recover({ reclaimLeased: true }).catch((e) => {
         console.warn("Job recovery failed:", e instanceof Error ? e.message : String(e));
     });
     console.log("✓ Incident Job Recovery Complete");
+    startRecoveryLoop(incidentGateway);
 
     startUpdateReminderLoop({
       incidentRepo,

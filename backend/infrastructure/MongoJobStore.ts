@@ -26,8 +26,8 @@ export interface IJobStore {
   complete(key: string): Promise<void>;
   reschedule(key: string, attempts: number, notBefore: Date, error: string): Promise<void>;
   failTerminal(key: string, attempts: number, error: string): Promise<void>;
-  /** Atomically claims the oldest due job (pending, or inflight past lease). */
-  claimDue(now: Date, leaseMs: number): Promise<ClaimedJob | null>;
+  /** Atomically claims the oldest due job (pending past notBefore, or inflight past lease — or any inflight with includeLeased). */
+  claimDue(now: Date, leaseMs: number, opts?: { includeLeased?: boolean }): Promise<ClaimedJob | null>;
 }
 
 export class MongoJobStore implements IJobStore {
@@ -75,12 +75,15 @@ export class MongoJobStore implements IJobStore {
     });
   }
 
-  async claimDue(now: Date, leaseMs: number): Promise<ClaimedJob | null> {
+  async claimDue(now: Date, leaseMs: number, opts?: { includeLeased?: boolean }): Promise<ClaimedJob | null> {
     const doc = await IncidentJobModel.findOneAndUpdate(
       {
         $or: [
           { status: "pending" as IncidentJobStatus, notBefore: { $lte: now } },
           { status: "inflight" as IncidentJobStatus, leaseExpires: { $lte: now } },
+          // Boot reclaim: the previous process is dead, so its unexpired
+          // leases are due immediately. Steady-state callers omit this.
+          ...(opts?.includeLeased ? [{ status: "inflight" as IncidentJobStatus }] : []),
         ],
       },
       {

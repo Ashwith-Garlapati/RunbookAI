@@ -18,6 +18,7 @@ import { IncidentStatus, incidentStatusLabel } from "../domains/incident/Inciden
 import { parseSeverity } from "../domains/incident/IncidentSeverity.js";
 import { parseRole, IncidentRole } from "../domains/incident/IncidentRoles.js";
 import { IncidentAuthorizationError } from "../domains/incident/IncidentPermissions.js";
+import { IncidentChannelConflictError } from "../domains/incident/IncidentRepository.js";
 import type { SlackClientProvider } from "./slackClientProvider.js";
 import { SlackChannelManager, type ChannelClientLike } from "./SlackChannelManager.js";
 import { buildControlBlocks, controlMessageText } from "./SlackControlMessage.js";
@@ -60,8 +61,12 @@ export interface IncidentJobDescriptor {
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
 const strOrNull = (v: unknown): string | null => (typeof v === "string" && v.length > 0 ? v : null);
 
-export async function runIncidentJob(ctx: IncidentJobContext, job: IncidentJobDescriptor): Promise<void> {
-  const slack = (await ctx.clients.forTeam(job.teamId)) as unknown as AnyClient;
+export async function runIncidentJob(
+  ctx: IncidentJobContext,
+  job: IncidentJobDescriptor,
+  slackOverride?: AnyClient,
+): Promise<void> {
+  const slack = slackOverride ?? ((await ctx.clients.forTeam(job.teamId)) as unknown as AnyClient);
   switch (job.op) {
     case "declare":
       await runDeclare(ctx, slack, job);
@@ -112,6 +117,32 @@ function notifyIn(channelId: string | null, userId: string) {
     if (!channelId) return;
     await ephemeral(slack, channelId, userId, text);
   };
+}
+
+/**
+ * Single failure notifier for live runs and replays: ephemeral in the
+ * incident channel when known, DM to the user otherwise. Best-effort —
+ * never fails the job. (notifyIn covers business-logic notices; this
+ * covers failure delivery with the DM fallback.)
+ */
+async function notifyFailure(
+  slack: AnyClient,
+  channelId: string | null,
+  userId: string,
+  text: string,
+): Promise<void> {
+  try {
+    if (channelId) {
+      await ephemeral(slack, channelId, userId, text);
+    } else {
+      await (slack.chat.postMessage as (a: Record<string, unknown>) => Promise<{ ts?: string }>)({
+        channel: userId,
+        text,
+      });
+    }
+  } catch {
+    // Best effort — never fail the job on a notification.
+  }
 }
 
 async function runDeclare(
@@ -234,8 +265,10 @@ async function runUpdate(
   const teamId = job.teamId;
   const userId = str(p.userId);
   const incidentId = str(p.incidentId);
-  const notify = notifyIn(strOrNull(p.channelId), userId).bind(null, slack);
   const before = await ctx.coordinator.get(incidentId, teamId);
+  // Live modal params carry no channelId — fall back to the incident channel
+  // so replays notify exactly like live runs.
+  const notify = notifyIn(strOrNull(p.channelId) ?? before.channelId, userId).bind(null, slack);
   if (before.status === "closed" || before.status === "cancelled") {
     await notify(
       `This incident is *${incidentStatusLabel(before.status)}* — updates are disabled. Reopen a new incident with \`/inc\` if the issue is back.`,
@@ -282,7 +315,7 @@ async function runRole(ctx: IncidentJobContext, job: IncidentJobDescriptor): Pro
 
 async function runAction(ctx: IncidentJobContext, job: IncidentJobDescriptor): Promise<void> {
   const p = job.params;
-  await ctx.coordinator.createAction(ctxFor(job.teamId, str(p.userId)), str(p.incidentId), {
+  await ctx.coordinator.createAction(ctxFor(job.teamId, str(p.userId), `action:${job.key}`), str(p.incidentId), {
     title: str(p.title),
     description: str(p.description),
     assignee: strOrNull(p.assignee),
@@ -291,7 +324,7 @@ async function runAction(ctx: IncidentJobContext, job: IncidentJobDescriptor): P
 
 async function runFollowUp(ctx: IncidentJobContext, job: IncidentJobDescriptor): Promise<void> {
   const p = job.params;
-  await ctx.coordinator.createFollowUp(ctxFor(job.teamId, str(p.userId)), str(p.incidentId), {
+  await ctx.coordinator.createFollowUp(ctxFor(job.teamId, str(p.userId), `followup:${job.key}`), str(p.incidentId), {
     title: str(p.title),
     description: str(p.description),
   });
@@ -304,13 +337,13 @@ async function runEscalate(ctx: IncidentJobContext, job: IncidentJobDescriptor):
   const reason = str(p.reason);
   if (!reason.trim()) throw new Error("Escalation reason is required");
   for (const toUser of targets) {
-    await ctx.coordinator.escalate(ctxFor(job.teamId, str(p.userId)), str(p.incidentId), toUser, reason);
+    await ctx.coordinator.escalate(ctxFor(job.teamId, str(p.userId), `escalate:${job.key}:${toUser}`), str(p.incidentId), toUser, reason);
   }
 }
 
 async function runHandover(ctx: IncidentJobContext, job: IncidentJobDescriptor): Promise<void> {
   const p = job.params;
-  await ctx.coordinator.handover(ctxFor(job.teamId, str(p.userId)), str(p.incidentId), str(p.newCommander));
+  await ctx.coordinator.handover(ctxFor(job.teamId, str(p.userId), `handover:${job.key}`), str(p.incidentId), str(p.newCommander));
 }
 
 async function runResolve(
@@ -322,15 +355,17 @@ async function runResolve(
   const teamId = job.teamId;
   const userId = str(p.userId);
   const incidentId = str(p.incidentId);
-  const notify = notifyIn(strOrNull(p.channelId), userId).bind(null, slack);
   const before = await ctx.coordinator.get(incidentId, teamId);
+  // Live modal params carry no channelId — fall back to the incident channel
+  // so replays notify exactly like live runs.
+  const notify = notifyIn(strOrNull(p.channelId) ?? before.channelId, userId).bind(null, slack);
   if (before.status === "resolved") {
     await notify(
       `This incident is already *Resolved*${before.resolution ? ` by <@${before.resolution.resolvedBy}>` : ""}. Nothing changed — close it with \`/inc close\` when the workflow is complete.`,
     );
     return;
   }
-  await ctx.coordinator.resolve(ctxFor(teamId, userId), incidentId, {
+  await ctx.coordinator.resolve(ctxFor(teamId, userId, `resolve:${job.key}`), incidentId, {
     summary: str(p.summary),
     mitigation: str(p.mitigation),
   });
@@ -339,7 +374,7 @@ async function runResolve(
 
 async function runCancel(ctx: IncidentJobContext, job: IncidentJobDescriptor): Promise<void> {
   const p = job.params;
-  await ctx.coordinator.cancel(ctxFor(job.teamId, str(p.userId)), str(p.incidentId), str(p.reason));
+  await ctx.coordinator.cancel(ctxFor(job.teamId, str(p.userId), `cancel:${job.key}`), str(p.incidentId), str(p.reason));
 }
 
 async function runClose(
@@ -394,15 +429,17 @@ async function runLink(
       reason: error instanceof Error ? error.message : String(error),
     });
     const message = error instanceof Error ? error.message : "";
-    await ephemeral(
+    await notifyFailure(
       slack,
-      channelId,
+      channelId || null,
       userId,
       /not found|different workspace/i.test(message)
         ? `I couldn't find incident \`${targetId}\` in this workspace. Check the ID and try again.`
         : error instanceof IncidentAuthorizationError
           ? "You are not permitted to link incidents."
-          : "Could not link the incident. Please try again.",
+          : error instanceof IncidentChannelConflictError
+            ? "This channel is already coordinating another incident. Link from a different channel, or close that incident first."
+            : "Could not link the incident. Please try again.",
     );
   }
 }
@@ -413,14 +450,27 @@ async function runAccept(
   job: IncidentJobDescriptor,
 ): Promise<void> {
   const p = job.params;
+  const teamId = job.teamId;
+  const userId = str(p.userId);
+  const incidentId = str(p.incidentId);
   try {
-    await ctx.coordinator.acknowledgeRole(ctxFor(job.teamId, str(p.userId)), str(p.incidentId), IncidentRole.IncidentCommander);
-    await refreshControlFrom(ctx, slack, str(p.incidentId), job.teamId);
+    await ctx.coordinator.acknowledgeRole(ctxFor(teamId, userId), incidentId, IncidentRole.IncidentCommander);
+    await refreshControlFrom(ctx, slack, incidentId, teamId);
   } catch (error) {
     logger.warn("IncidentJobs", "AcceptFailed", {
-      incidentId: str(p.incidentId),
+      incidentId,
       reason: error instanceof Error ? error.message : String(error),
     });
+    // The clicking user must hear about the failure (DM control has no
+    // channel fallback); the control is refreshed so it never goes stale.
+    await refreshControlFrom(ctx, slack, incidentId, teamId);
+    const reason = error instanceof Error ? error.message : String(error);
+    const text =
+      error instanceof IncidentAuthorizationError
+        ? "You are not permitted to accept this incident."
+        : `Could not accept the incident (${reason}). Please try again.`;
+    const incident = await ctx.coordinator.get(incidentId, teamId).catch(() => null);
+    await notifyFailure(slack, incident?.channelId ?? null, userId, text);
   }
 }
 

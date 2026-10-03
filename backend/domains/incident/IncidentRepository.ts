@@ -42,6 +42,23 @@ export class IncidentVersionConflictError extends Error {
   }
 }
 
+/**
+ * Thrown when a channel is already linked to a different incident.
+ * Lets callers (e.g. runLink) tell the user exactly what is wrong
+ * instead of falling through to a generic retry prompt.
+ */
+export class IncidentChannelConflictError extends Error {
+  readonly channelId: SlackChannelId;
+  readonly ownerIncidentId: IncidentId;
+
+  constructor(channelId: SlackChannelId, ownerIncidentId: IncidentId) {
+    super(`Channel ${channelId} is already linked to incident ${ownerIncidentId}`);
+    this.name = "IncidentChannelConflictError";
+    this.channelId = channelId;
+    this.ownerIncidentId = ownerIncidentId;
+  }
+}
+
 /** Idempotency record for Slack deliveries and mutating UI actions. */
 export interface IIdempotencyStore {
   /**

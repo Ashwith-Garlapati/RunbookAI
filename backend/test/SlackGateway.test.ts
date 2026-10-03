@@ -11,6 +11,8 @@ import {
   normalizeMention,
 } from "../slack/SlackGateway.js";
 import { buildChannelName } from "../slack/SlackChannelManager.js";
+import { IncidentAuthorizationError } from "../domains/incident/IncidentPermissions.js";
+import { MembershipLevel } from "../domains/incident/IncidentRoles.js";
 
 describe("isFreshSlackTimestamp", () => {
   it("accepts fresh, rejects stale and far-future", () => {
@@ -56,6 +58,34 @@ describe("SlackGateway idempotency", () => {
       },
     });
     await vi.waitFor(() => expect(calls).toBe(3), { timeout: 15000 });
+  });
+
+  it("does not retry authorization failures", async () => {
+    const gateway = new SlackGateway({ claimDelivery: async () => true });
+    let calls = 0;
+    gateway.enqueue({
+      key: "job-auth",
+      run: async () => {
+        calls += 1;
+        throw new IncidentAuthorizationError("close", MembershipLevel.Member);
+      },
+    });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(calls).toBe(1);
+  });
+
+  it("does not retry validation failures", async () => {
+    const gateway = new SlackGateway({ claimDelivery: async () => true });
+    let calls = 0;
+    gateway.enqueue({
+      key: "job-invalid",
+      run: async () => {
+        calls += 1;
+        throw new Error("Role and assignee are required");
+      },
+    });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(calls).toBe(1);
   });
 });
 

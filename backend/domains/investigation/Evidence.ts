@@ -12,9 +12,17 @@
 import type { EvidenceId, InvestigationId } from "./types.js";
 import type { EvidenceSource } from "./EvidenceSource.js";
 
+/** Source-specific provenance. Never reduced to a plain string summary. */
+export type EvidenceProvenance = Record<string, unknown>;
+
 /**
- * Represents a single piece of evidence collected during an investigation.
- * Future collectors will populate instances of this interface.
+ * Canonical evidence contract shared by ALL investigation sources
+ * (SLACK, GITHUB today; DATADOG/SENTRY/PAGERDUTY/KUBERNETES/AWS later).
+ *
+ * New canonical fields are OPTIONAL so rows persisted before this
+ * milestone (reference + metadata only) still reconstitute unchanged.
+ * `reference` remains the stable deduplication key and equals `sourceId`
+ * for every item created through the canonical factories.
  */
 export interface Evidence {
   readonly id: EvidenceId;
@@ -24,6 +32,15 @@ export interface Evidence {
   readonly reference: string;
   readonly collectedAt: Date;
   readonly metadata: Record<string, unknown>;
+  readonly teamId?: string | undefined;
+  readonly incidentId?: string | undefined;
+  readonly title?: string | undefined;
+  readonly content?: string | undefined;
+  readonly searchableText?: string | undefined;
+  readonly occurredAt?: Date | undefined;
+  readonly provenance?: EvidenceProvenance | undefined;
+  readonly sourceId?: string | undefined;
+  readonly hash?: string | undefined;
 }
 
 /**
