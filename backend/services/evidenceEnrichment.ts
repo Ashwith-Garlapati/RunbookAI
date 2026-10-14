@@ -47,8 +47,28 @@ const CALL_KEYWORDS = new Set([
 ]);
 
 const STOPWORDS = new Set(
-  "the,a,an,is,are,was,were,be,been,being,to,of,in,on,for,with,and,or,at,by,from,as,it,its,this,that,these,those,we,you,they,he,she,our,your,their,my,me,us,have,has,had,do,does,did,will,would,can,could,should,may,not,no,yes,if,then,than,so,but,also,just,now,here,there,when,where,what,which,who,how,why,all,any,more,most,some,such,only,very,into,over,after,before,up,down,out,about,between, during,while,per,via,etc,vs,am,pm,pm, st,nd,rd,th".split(","),
+  "the,a,an,is,are,was,were,be,been,being,to,of,in,on,for,with,and,or,at,by,from,as,it,its,this,that,these,those,we,you,they,he,she,our,your,their,my,me,us,have,has,had,do,does,did,will,would,can,could,should,may,not,no,yes,if,then,than,so,but,also,just,now,here,there,when,where,what,which,who,how,why,all,any,more,most,some,such,only,very,into,over,after,before,up,down,out,about,between,during,while,per,via,etc,vs,am,pm,st,nd,rd,th".split(","),
 );
+
+/** Leading words that are determiners, not service names ("the service" is not a service). */
+const SERVICE_NAME_DENY = new Set([
+  "the", "a", "an", "this", "that", "these", "those", "our", "your", "their",
+  "my", "its", "each", "every", "any", "some", "no", "other", "another", "same",
+  "such", "what", "which",
+]);
+
+/** Hyphenated tokens made only of common English words are phrases, not services. */
+const HYPHEN_COMMON_WORDS = new Set([
+  "well", "known", "follow", "up", "end", "to", "upto", "up-to", "date", "by",
+  "step", "one", "two", "first", "second", "high", "low", "long", "short",
+  "real", "time", "on", "off", "in", "out", "over", "under", "again", "back",
+]);
+
+const CLASS_SUFFIXES = new Set([
+  "service", "handler", "controller", "manager", "factory", "builder",
+  "repository", "provider", "client", "exception", "error", "config",
+  "helper", "util", "utils", "middleware", "interceptor", "listener",
+]);
 
 function uniq(values: string[]): string[] {
   return [...new Set(values)];
@@ -148,16 +168,25 @@ function extractErrors(text: string, entities: ExtractedEntity[], seen: Set<stri
 function extractServices(text: string, entities: ExtractedEntity[], seen: Set<string>, services: Set<string>): void {
   for (const hit of findAll(text, /\b([a-z0-9]+(?:-[a-z0-9]+)+)\b/g)) {
     const value = hit.value.toLowerCase();
+    const parts = value.split("-");
+    // Phrases built only from common English words ("well-known") are not services.
+    if (parts.length > 0 && parts.every((p) => HYPHEN_COMMON_WORDS.has(p))) continue;
     pushEntity(entities, seen, value, "SERVICE", "text", hit);
     services.add(value);
   }
   for (const hit of findAll(text, /\b([A-Za-z][\w-]*)\s+service\b/gi)) {
-    const value = `${hit.value.replace(/\s+service$/i, "").toLowerCase()}-service`;
+    const raw = hit.value.replace(/\s+service$/i, "").toLowerCase();
+    // Determiners are not service names ("the service" names nothing).
+    if (SERVICE_NAME_DENY.has(raw) || STOPWORDS.has(raw)) continue;
+    const value = `${raw}-service`;
     pushEntity(entities, seen, value, "SERVICE", "text", hit);
     services.add(value);
   }
   for (const hit of findAll(text, /\b([A-Za-z][\w-]*)\s+API\b/g)) {
-    const value = `${hit.value.replace(/\s+API$/, "").toLowerCase()}-api`;
+    const raw = hit.value.replace(/\s+API$/, "").toLowerCase();
+    // Determiners are not service names ("an API" names nothing).
+    if (SERVICE_NAME_DENY.has(raw) || STOPWORDS.has(raw)) continue;
+    const value = `${raw}-api`;
     pushEntity(entities, seen, value, "SERVICE", "text", hit);
     services.add(value);
   }
@@ -176,15 +205,6 @@ function extractEndpoints(text: string, entities: ExtractedEntity[], seen: Set<s
   for (const hit of findAll(text, /\b(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\b/g)) {
     pushEntity(entities, seen, hit.value, "HTTP_METHOD", "text", hit);
   }
-  // Endpoint ↔ word corroboration: a standalone word matching an endpoint's
-  // first segment (e.g. "Checkout" + "/checkout") names the owning service.
-  const words = new Set((text.match(/\b[a-zA-Z][\w-]*\b/g) ?? []).map((w) => w.toLowerCase()));
-  for (const endpoint of endpoints) {
-    const segment = endpoint.split("/").filter(Boolean)[0]?.toLowerCase().replace(/[{}.:].*$/, "");
-    if (segment && segment.length >= 3 && words.has(segment) && !INFRA_NOUNS.has(segment)) {
-      pushEntity(entities, seen, segment, "SERVICE", "text");
-    }
-  }
 }
 
 function extractCodeEntities(text: string, entities: ExtractedEntity[], seen: Set<string>, out: { functions: Set<string>; classes: Set<string>; files: Set<string> }): void {
@@ -202,6 +222,11 @@ function extractCodeEntities(text: string, entities: ExtractedEntity[], seen: Se
   for (const hit of findAll(text, /\b([A-Z][A-Za-z0-9]+)\b/g)) {
     // All-caps abbreviations (PR, INC, API) are not classes.
     if (/^[A-Z0-9]+$/.test(hit.value)) continue;
+    // Bare Titlecase words ("Meeting", "Checkout", "See") are prose, not classes.
+    // A class signal needs an interior hump (PaymentService) or a component suffix.
+    const hasHump = /[a-z][A-Z]/.test(hit.value);
+    const suffixMatch = /([A-Z][a-z]+)$/.exec(hit.value)?.[1]?.toLowerCase();
+    if (!hasHump && (!suffixMatch || !CLASS_SUFFIXES.has(suffixMatch))) continue;
     pushEntity(entities, seen, hit.value, "CLASS", "text", hit);
     out.classes.add(hit.value);
   }
@@ -252,17 +277,22 @@ interface DeploymentRef {
 }
 
 function extractDeployments(text: string, entities: ExtractedEntity[], seen: Set<string>, out: DeploymentRef[]): void {
+  const seenLabels = new Set(out.map((d) => d.label));
+  const push = (reference: string | null, label: string, hit: { start: number; end: number }): void => {
+    pushEntity(entities, seen, label, "DEPLOYMENT", "text", hit);
+    // Same deployment mentioned twice is one deployment (no duplicate entities).
+    if (!seenLabels.has(label)) {
+      seenLabels.add(label);
+      out.push({ reference, label });
+    }
+  };
   for (const hit of findAll(text, /\bdeployment\s+#?(?:\d+)\b|\bdeploy\s+#?(?:\d+)\b/gi)) {
     const n = /(\d+)\s*$/.exec(hit.value)?.[1] ?? "";
-    const label = `deployment ${n}`;
-    pushEntity(entities, seen, label, "DEPLOYMENT", "text", hit);
-    out.push({ reference: n || null, label });
+    push(n || null, `deployment ${n}`, hit);
   }
   for (const hit of findAll(text, /\brollback(?:\s+deployment)?\s+#?(?:\d+)\b/gi)) {
     const n = /(\d+)\s*$/.exec(hit.value)?.[1] ?? "";
-    const label = `rollback ${n}`;
-    pushEntity(entities, seen, label, "DEPLOYMENT", "text", hit);
-    out.push({ reference: n || null, label });
+    push(n || null, `rollback ${n}`, hit);
   }
 }
 
@@ -271,13 +301,15 @@ const EVENT_PATTERNS: Array<{ type: ExtractedEvent["type"]; pattern: RegExp }> =
   { type: "DEPLOYMENT", pattern: /\bdeploys?\b|\bdeploy(?:ed|ing|ment)\b|\bship(?:ped|ping)?\b|\brelease(?:d)?\b/i },
   { type: "RESTART", pattern: /\brestart(?:ed|ing|s)?\b|\breboot(?:ed|ing)?\b/i },
   { type: "OUTAGE", pattern: /\boutage\b/i },
-  { type: "FAILURE", pattern: /\bfail(?:ure|ed|ing|s)?\b|\b5\d\ds?\b|\bbroken\b|\bdown\b/i },
-  { type: "RECOVERY", pattern: /\brecover(?:ed|ing|y)?\b|\bresolv(?:ed|ing)?\b|\bfix(?:ed|ing|es)?\b|\beasing\b|\bdropping\b|\bmitigat\w*\b/i },
+  // Bare "down" alone is not a failure signal ("scroll down"). It counts only
+  // as a service-state predicate ("service is down", "API was down").
+  { type: "FAILURE", pattern: /\bfail(?:ure|ed|ing|s)?\b|\b5\d\ds?\b|\bbroken\b|(?:\b(?:is|are|was|were|be|been|being|went|go|goes|going|gone|remains?|stays?|staying|service|api|server|site|app|cluster|system|db)\s+down\b)/i },
+  { type: "RECOVERY", pattern: /\brecover(?:ed|ing|y)?\b|\bresolv(?:ed|ing)?\b|\bfix(?:ed|ing|es)?\b|\beasing\b|\bdropping\b/i },
   { type: "CONFIG_CHANGE", pattern: /\bconfig(?:uration)?(?:\s+change)?\b|\bfeature flag\b|\bflag flip\b/i },
   { type: "MIGRATION", pattern: /\bmigrat\w*\b/i },
   { type: "SCALING", pattern: /\bscal\w*\b|\bautoscal\w*\b/i },
   { type: "ALERT", pattern: /\balert(?:ed|ing|s)?\b|\bpaged?\b|\bpaging\b/i },
-  { type: "MITIGATION", pattern: /\bworkaround\b/i },
+  { type: "MITIGATION", pattern: /\bmitigat\w*\b|\bworkaround\b/i },
 ];
 
 function extractEvents(

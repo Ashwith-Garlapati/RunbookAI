@@ -9,6 +9,7 @@
 
 import type { Incident } from "../domains/incident/Incident.js";
 import type { IncidentCoordinator } from "../domains/incident/IncidentCoordinator.js";
+import type { EvidenceEnrichment } from "../domains/investigation/Evidence.js";
 import { EvidenceSource } from "../domains/investigation/EvidenceSource.js";
 import type { EvidenceItem } from "../domains/investigation/EvidenceItem.js";
 import type { IEvidenceRepository } from "../domains/investigation/RepositoryInterfaces.js";
@@ -38,6 +39,8 @@ export interface ContextEvidence {
   readonly occurredAt: string | null;
   readonly provenance: Record<string, unknown>;
   readonly sourceId: string;
+  /** Deterministic NLP enrichment where available; absent until enriched. */
+  readonly enrichment?: EvidenceEnrichment | undefined;
 }
 
 export interface InvestigationContext {
@@ -91,6 +94,8 @@ function toContextEvidence(item: EvidenceItem): ContextEvidence {
     occurredAt: item.occurredAt ? item.occurredAt.toISOString() : null,
     provenance: item.provenance ? { ...item.provenance } : {},
     sourceId: item.sourceId ?? item.reference,
+    // NLP enrichment rides along where present; raw content/provenance untouched.
+    ...(item.enrichment ? { enrichment: item.enrichment } : {}),
   };
 }
 

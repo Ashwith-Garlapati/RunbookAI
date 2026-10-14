@@ -153,4 +153,101 @@ describe("InvestigationContext", () => {
     expect(ctx.slackEvidence).toHaveLength(1);
     expect(ctx.version).toBe("1");
   });
+
+  it("preserves evidence IDs and source provenance", () => {
+    const incident = buildIncident();
+    const builder = new InvestigationContextBuilder(fakeCoordinator(incident), repoWith([]));
+    const items = [slackItem("1.000100", "We are seeing 500s."), githubItem("company/payments-service@abc123", "fix auth")];
+    const ctx = builder.build({ teamId: "T1", incidentId: incident.id, investigationId: "inv-142", incident, items });
+    expect(ctx.slackEvidence[0]?.id).toBe(items[0]?.id);
+    expect(ctx.githubEvidence[0]?.id).toBe(items[1]?.id);
+    expect(ctx.slackEvidence[0]?.sourceId).toBe(items[0]?.sourceId);
+    expect(ctx.slackEvidence[0]?.provenance["channelId"]).toBe("C-inc-142");
+    expect(ctx.githubEvidence[0]?.provenance["repository"]).toBe("company/payments-service");
+    expect(ctx.slackEvidence[0]?.content).toBe(items[0]?.content);
+  });
+
+  it("includes NLP enrichment where available and omits it otherwise", async () => {
+    const { EvidenceEnrichmentService } = await import("../services/evidenceEnrichment.js");
+    const incident = buildIncident();
+    const builder = new InvestigationContextBuilder(fakeCoordinator(incident), repoWith([]));
+    const enricher = new EvidenceEnrichmentService();
+    const enriched = enricher.enrichOne(slackItem("1.000100", "payments-service 500 on /checkout"));
+    const plain = slackItem("2.000100", "acknowledged");
+    const ctx = builder.build({ teamId: "T1", incidentId: incident.id, investigationId: "inv-142", incident, items: [enriched, plain] });
+    const withNlp = ctx.slackEvidence.find((e) => e.sourceId === enriched.sourceId);
+    expect(withNlp?.enrichment?.version).toBe("1");
+    expect(withNlp?.enrichment?.services).toContain("payments-service");
+    // Raw content is preserved alongside enrichment.
+    expect(withNlp?.content).toBe("payments-service 500 on /checkout");
+    const withoutNlp = ctx.slackEvidence.find((e) => e.sourceId === plain.sourceId);
+    expect(withoutNlp?.enrichment).toBeUndefined();
+  });
+
+  it("builds from partial evidence without fabrication", () => {
+    const incident = Incident.declare({ teamId: "T1", title: "Blip", reporterId: "U1" });
+    const builder = new InvestigationContextBuilder(fakeCoordinator(incident), repoWith([]));
+    // Only one thread survived a partial collection; the rest never stored.
+    const ctx = builder.build({
+      teamId: "T1",
+      incidentId: incident.id,
+      investigationId: "inv-1",
+      incident,
+      items: [slackItem("2.000100", "We are seeing 500s.", "2.000100")],
+    });
+    expect(ctx.evidenceSummary).toMatchObject({ slackCount: 1, githubCount: 0, totalCount: 1 });
+    expect(ctx.slackEvidence).toHaveLength(1);
+    expect(ctx.symptoms).toEqual(["Blip"]);
+    expect(ctx.affectedServices).toEqual([]);
+  });
+
+  it("uses actual incident identifiers and never invents symptoms", () => {
+    const incident = buildIncident();
+    let seenIncidentId = "";
+    let seenTeam = "";
+    const coordinator = {
+      get: async (incidentId: string, teamId: string) => {
+        seenIncidentId = incidentId;
+        seenTeam = teamId;
+        return incident;
+      },
+    } as never;
+    const builder = new InvestigationContextBuilder(coordinator, repoWith([slackItem("1.000100", "x")]));
+    return builder.buildForIncident({ teamId: "T-ACTUAL", incidentId: incident.id }).then((ctx) => {
+      expect(seenIncidentId).toBe(incident.id);
+      expect(seenTeam).toBe("T-ACTUAL");
+      expect(ctx.incidentId).toBe(incident.id);
+      expect(ctx.teamId).toBe("T-ACTUAL");
+      // Symptoms mirror incident title/description exactly — nothing inferred.
+      expect(ctx.symptoms).toEqual(["Checkout API returning 500s on /checkout", "payments-service timeout errors"]);
+      expect(ctx.affectedServices).toEqual(["payments-service"]);
+    });
+  });
+
+  it("rebuilds from authoritative records instead of a stale snapshot", () => {
+    const incident = buildIncident();
+    const builder = new InvestigationContextBuilder(fakeCoordinator(incident), repoWith([]));
+    const params = { teamId: "T1", incidentId: incident.id, investigationId: "inv-142", incident, items: [] as ReturnType<typeof slackItem>[] };
+    const first = builder.build(params);
+    expect(first.incident.title).toContain("Checkout");
+    incident.postUpdate("U-responder", { text: "Rollback completed, errors dropping" });
+    const second = builder.build({ ...params, items: [slackItem("7.000100", "Rollback completed.")] });
+    expect(second.timeline.length).toBeGreaterThan(first.timeline.length);
+    expect(second.slackEvidence).toHaveLength(1);
+    expect(second.evidenceSummary.totalCount).toBe(1);
+  });
+
+  it("handles repeated context construction deterministically", () => {
+    const incident = buildIncident();
+    const builder = new InvestigationContextBuilder(fakeCoordinator(incident), repoWith([]));
+    const items = [slackItem("2.000100", "b"), slackItem("1.000100", "a"), githubItem("r@sha", "x")];
+    const params = { teamId: "T1", incidentId: incident.id, investigationId: "inv-142", incident, items };
+    const first = builder.build(params);
+    const second = builder.build(params);
+    const { generatedAt: _g1, ...rest1 } = first;
+    const { generatedAt: _g2, ...rest2 } = second;
+    void _g1;
+    void _g2;
+    expect(rest2).toEqual(rest1);
+  });
 });

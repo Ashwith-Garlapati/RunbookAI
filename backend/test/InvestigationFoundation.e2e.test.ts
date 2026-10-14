@@ -466,6 +466,39 @@ describe("investigation foundation end-to-end", () => {
     expect(file?.provenance.filePath).toBe("src/auth/validateToken.ts");
   });
 
+  it("associates every stored record with the correct investigation", async () => {
+    const w = await buildWorld();
+    const invId = w.investigation.id;
+    const client = slackClient();
+    const collected = await w.slackCollector.collectChannelHistory({
+      teamId: TEAM,
+      channelId: CHANNEL,
+      investigationId: invId,
+      incidentId: w.incident.id,
+      client,
+    });
+    await w.slackStore.saveAll(invId, collected.items);
+    const { records } = await collectGitHubEvidence(w.connector, GH_CONTEXT, {
+      branch: "main",
+      maxRelevantFiles: 2,
+      includeValidation: true,
+    });
+    await w.githubStore.saveAll(invId, records);
+    const stored = await w.evidence.findByInvestigationId(invId);
+    expect(stored.length).toBeGreaterThan(0);
+    for (const item of stored) {
+      expect(item.investigationId).toBe(invId);
+      expect(item.sourceId ?? item.reference).toBeTruthy();
+      expect(item.content ?? item.searchableText).toBeTruthy();
+    }
+    // GitHub records kept their structured provenance through the store.
+    const github = stored.filter((d) => d.source === EvidenceSource.GitHub);
+    expect(github.length).toBeGreaterThan(0);
+    expect(github.every((d) => (d.provenance?.["repository"] as string) === REPO)).toBe(true);
+    // A second investigation sees none of this evidence (no cross-talk).
+    expect(await w.evidence.findByInvestigationId("inv-other")).toHaveLength(0);
+  });
+
   it("runs the full pipeline: store, enrich, context — then reruns without duplication", async () => {
     const w = await buildWorld();
     const invId = w.investigation.id;

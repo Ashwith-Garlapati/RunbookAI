@@ -1,12 +1,11 @@
 /**
- * Investigation Domain - Evidence Interfaces (Placeholder)
+ * Investigation Domain - Evidence Contracts (implemented)
  *
- * Defines the contracts for evidence that will be collected during an investigation.
- * These are interfaces only — actual evidence collectors are not yet implemented.
- *
- * The Investigation aggregate stores evidence as references (EvidenceReference).
- * These interfaces define the shape of evidence data that will be populated
- * by future collector integrations (Slack, GitHub, etc.).
+ * Canonical evidence contract shared by ALL investigation sources
+ * (Slack, GitHub today; DATADOG/SENTRY/PAGERDUTY/KUBERNETES/AWS later).
+ * Collectors (Slack channel history + live ingest, GitHub retrieval),
+ * the CommonEvidenceStore, deterministic NLP enrichment, and the
+ * InvestigationContextBuilder all operate on these shapes.
  */
 
 import type { EvidenceId, InvestigationId } from "./types.js";

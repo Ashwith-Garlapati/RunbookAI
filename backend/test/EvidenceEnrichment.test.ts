@@ -251,4 +251,118 @@ describe("evidence enrichment", () => {
     expect(enrichment.files).toContain("src/auth/validateToken.ts");
     expect(enrichment.functions).toContain("validateToken");
   });
+
+  it("does not fabricate services from determiners or plain prose", () => {
+    expect(enrichEvidence(slackItem("the service is down")).services).toEqual([]);
+    expect(enrichEvidence(slackItem("an API is failing")).services).toEqual([]);
+    // Genuine references still extract.
+    expect(enrichEvidence(slackItem("Auth service is timing out")).services).toContain("auth-service");
+    expect(enrichEvidence(slackItem("Checkout API is slow")).services).toContain("checkout-api");
+  });
+
+  it("does not treat common hyphenated phrases as services", () => {
+    const enrichment = enrichEvidence(slackItem("well-known issue, needs follow-up"));
+    expect(enrichment.services).toEqual([]);
+    expect(enrichEvidence(slackItem("payments-service is down")).services).toContain("payments-service");
+  });
+
+  it("detects mitigation events instead of misclassifying them as recovery", () => {
+    for (const text of ["mitigation in progress", "mitigating the issue", "workaround applied"]) {
+      const types = enrichEvidence(slackItem(text)).events.map((e) => e.type);
+      expect(types).toContain("MITIGATION");
+      expect(types).not.toContain("RECOVERY");
+    }
+    // Genuine recovery still detected.
+    expect(enrichEvidence(slackItem("Error rate is dropping")).events.map((e) => e.type)).toContain("RECOVERY");
+  });
+
+  it("requires a service-state predicate for bare 'down'", () => {
+    expect(enrichEvidence(slackItem("scroll down to see")).events.map((e) => e.type)).not.toContain("FAILURE");
+    expect(enrichEvidence(slackItem("payments-service is down")).events.map((e) => e.type)).toContain("FAILURE");
+    expect(enrichEvidence(slackItem("The Checkout API is DOWN with 500s")).events.map((e) => e.type)).toContain("FAILURE");
+  });
+
+  it("does not invent classes from Titlecase prose or services from endpoint words", () => {
+    const prose = enrichEvidence(slackItem("We had a Meeting about it"));
+    expect(prose.classes).toEqual([]);
+    const endpoint = enrichEvidence(slackItem("See /checkout for details on Checkout flow"));
+    expect(endpoint.endpoints).toContain("/checkout");
+    expect(endpoint.services).toEqual([]);
+    // Genuine CamelCase classes still extract.
+    expect(enrichEvidence(slackItem("validateToken() throws in PaymentService")).classes).toContain("PaymentService");
+  });
+
+  it("dedupes repeated deployment mentions without duplicating entities", () => {
+    const enrichment = enrichEvidence(slackItem("deployment 841 started, deployment 841 finished"));
+    expect(enrichment.deployments).toEqual([{ reference: "841", label: "deployment 841" }]);
+    expect(enrichment.entities.filter((e) => e.type === "DEPLOYMENT")).toHaveLength(1);
+  });
+
+  it("handles unsupported source types without throwing", () => {
+    const item = EvidenceItem.createCanonical({
+      investigationId: "inv-1",
+      source: "DATADOG" as never,
+      type: "metric",
+      sourceId: "dd:1",
+      content: "latency spike on /checkout with 500s",
+    });
+    const enrichment = enrichEvidence(item);
+    expect(enrichment.endpoints).toContain("/checkout");
+    expect(enrichment.classification.semantic).toContain("OBSERVATION");
+  });
+
+  it("preserves identity, timestamps, and provenance through enrichment", () => {
+    const service = new EvidenceEnrichmentService();
+    const item = EvidenceItem.createCanonical({
+      investigationId: "inv-1",
+      source: EvidenceSource.Slack,
+      type: "THREAD_MESSAGE",
+      sourceId: "slack:T1:C1:1.1:1.2",
+      teamId: "T1",
+      incidentId: "inc-1",
+      content: "payments-service 500",
+      occurredAt: new Date("2026-09-30T14:00:00Z"),
+      provenance: { channelId: "C1", userId: "U1" },
+    });
+    const enriched = service.enrichOne(item);
+    expect(enriched.id).toBe(item.id);
+    expect(enriched.sourceId).toBe(item.sourceId);
+    expect(enriched.source).toBe(item.source);
+    expect(enriched.occurredAt?.toISOString()).toBe("2026-09-30T14:00:00.000Z");
+    expect(enriched.provenance).toEqual(item.provenance);
+    expect(enriched.content).toBe(item.content);
+    expect(enriched.enrichment?.version).toBe("1");
+  });
+
+  it("survives a persistence reload round-trip with enrichment intact", () => {
+    const service = new EvidenceEnrichmentService();
+    const enriched = service.enrichOne(slackItem("payments-service 500 on /checkout deployment 12"));
+    // Simulate DB reload: serialize to plain JSON and reconstitute.
+    const reloaded = EvidenceItem.reconstitute(JSON.parse(JSON.stringify(enriched)));
+    expect(reloaded.id).toBe(enriched.id);
+    expect(reloaded.enrichment?.services).toEqual(enriched.enrichment?.services);
+    expect(reloaded.enrichment?.errors).toEqual(enriched.enrichment?.errors);
+    expect(reloaded.enrichment?.deployments).toEqual(enriched.enrichment?.deployments);
+    expect(reloaded.content).toBe(enriched.content);
+    // Re-enrichment after reload is semantically identical (ignoring processedAt).
+    const again = service.enrichOne(reloaded);
+    const { processedAt: _a, ...first } = enriched.enrichment ?? {};
+    const { processedAt: _b, ...second } = again.enrichment ?? {};
+    void _a;
+    void _b;
+    expect(second).toEqual(first);
+    expect(again.id).toBe(enriched.id);
+  });
+
+  it("never concludes deployment 841 caused the incident", () => {
+    const enrichment = enrichEvidence(slackItem("Checkout API started returning 500s after deployment 841. Auth service is timing out."));
+    expect(JSON.stringify(enrichment)).not.toMatch(/\bcaus/i);
+    for (const r of enrichment.relationships) {
+      expect(["PRECEDES", "ASSOCIATED_WITH_REDUCTION_IN", "MODIFIES", "AUTHORED_BY", "MENTIONS"]).toContain(r.relation);
+    }
+    // Temporal precedence is recorded; causality is not.
+    expect(enrichment.relationships).toContainEqual(
+      expect.objectContaining({ relation: "PRECEDES", to: "HTTP 500" }),
+    );
+  });
 });

@@ -57,7 +57,10 @@ export class MongoEvidenceRepository implements IEvidenceRepository {
   }
 
   async update(evidence: EvidenceItem): Promise<boolean> {
-    const result = await EvidenceModel.findByIdAndUpdate(evidence.id, { $set: toDoc(evidence) }, { upsert: false });
+    // _id is immutable in Mongo — never include it in $set.
+    const { _id: _ignored, ...doc } = toDoc(evidence);
+    void _ignored;
+    const result = await EvidenceModel.findByIdAndUpdate(evidence.id, { $set: doc }, { upsert: false });
     return result !== null;
   }
 
