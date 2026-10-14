@@ -69,6 +69,12 @@ function memoryRepo(): IEvidenceRepository & { docs: EvidenceItem[] } {
     create: async (e) => {
       docs.push(e);
     },
+    update: async (e) => {
+      const index = docs.findIndex((d) => d.id === e.id);
+      if (index >= 0) docs[index] = e;
+      else docs.push(e);
+      return true;
+    },
     findById: async () => null,
     findByInvestigationId: async (id) => docs.filter((d) => d.investigationId === id),
   };

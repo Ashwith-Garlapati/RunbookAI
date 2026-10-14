@@ -18,6 +18,8 @@ export interface IEvidenceDoc {
   provenance?: Record<string, unknown>;
   sourceId?: string;
   hash?: string;
+  /** Deterministic NLP enrichment (optional — absent until enriched). */
+  enrichment?: Record<string, unknown>;
 }
 
 const EvidenceSchema = new Schema<IEvidenceDoc>(
@@ -38,6 +40,7 @@ const EvidenceSchema = new Schema<IEvidenceDoc>(
     provenance: { type: Schema.Types.Mixed },
     sourceId: { type: String },
     hash: { type: String },
+    enrichment: { type: Schema.Types.Mixed },
   },
   { _id: false, timestamps: false }
 );

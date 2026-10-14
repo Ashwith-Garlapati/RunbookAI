@@ -2,6 +2,7 @@ import { EvidenceModel, type IEvidenceDoc } from "../models/InvestigationEvidenc
 import { EvidenceItem } from "../domains/investigation/EvidenceItem.js";
 import type { InvestigationId, EvidenceId } from "../domains/investigation/types.js";
 import type { EvidenceSource } from "../domains/investigation/EvidenceSource.js";
+import type { EvidenceEnrichment } from "../domains/investigation/Evidence.js";
 import type { IEvidenceRepository } from "../domains/investigation/RepositoryInterfaces.js";
 
 function toDomain(doc: IEvidenceDoc): EvidenceItem {
@@ -23,30 +24,41 @@ function toDomain(doc: IEvidenceDoc): EvidenceItem {
     // Legacy rows predate sourceId — reference has always been the stable key.
     ...(doc.sourceId || doc.reference ? { sourceId: (doc.sourceId ?? doc.reference) as string } : {}),
     ...(doc.hash ? { hash: doc.hash } : {}),
+    ...(doc.enrichment ? { enrichment: doc.enrichment as unknown as EvidenceEnrichment } : {}),
   });
+}
+
+function toDoc(evidence: EvidenceItem): Record<string, unknown> {
+  return {
+    _id: evidence.id,
+    investigationId: evidence.investigationId,
+    source: evidence.source,
+    type: evidence.type,
+    reference: evidence.reference,
+    collectedAt: evidence.collectedAt,
+    metadata: evidence.metadata,
+    ...(evidence.teamId ? { teamId: evidence.teamId } : {}),
+    ...(evidence.incidentId ? { incidentId: evidence.incidentId } : {}),
+    ...(evidence.title ? { title: evidence.title } : {}),
+    ...(evidence.content !== undefined ? { content: evidence.content } : {}),
+    ...(evidence.searchableText !== undefined ? { searchableText: evidence.searchableText } : {}),
+    ...(evidence.occurredAt ? { occurredAt: evidence.occurredAt } : {}),
+    ...(evidence.provenance ? { provenance: { ...evidence.provenance } } : {}),
+    ...(evidence.sourceId ? { sourceId: evidence.sourceId } : {}),
+    ...(evidence.hash ? { hash: evidence.hash } : {}),
+    ...(evidence.enrichment ? { enrichment: { ...evidence.enrichment } } : {}),
+  };
 }
 
 export class MongoEvidenceRepository implements IEvidenceRepository {
   async create(evidence: EvidenceItem): Promise<void> {
-    const doc = new EvidenceModel({
-      _id: evidence.id,
-      investigationId: evidence.investigationId,
-      source: evidence.source,
-      type: evidence.type,
-      reference: evidence.reference,
-      collectedAt: evidence.collectedAt,
-      metadata: evidence.metadata,
-      ...(evidence.teamId ? { teamId: evidence.teamId } : {}),
-      ...(evidence.incidentId ? { incidentId: evidence.incidentId } : {}),
-      ...(evidence.title ? { title: evidence.title } : {}),
-      ...(evidence.content !== undefined ? { content: evidence.content } : {}),
-      ...(evidence.searchableText !== undefined ? { searchableText: evidence.searchableText } : {}),
-      ...(evidence.occurredAt ? { occurredAt: evidence.occurredAt } : {}),
-      ...(evidence.provenance ? { provenance: { ...evidence.provenance } } : {}),
-      ...(evidence.sourceId ? { sourceId: evidence.sourceId } : {}),
-      ...(evidence.hash ? { hash: evidence.hash } : {}),
-    });
+    const doc = new EvidenceModel(toDoc(evidence));
     await doc.save();
+  }
+
+  async update(evidence: EvidenceItem): Promise<boolean> {
+    const result = await EvidenceModel.findByIdAndUpdate(evidence.id, { $set: toDoc(evidence) }, { upsert: false });
+    return result !== null;
   }
 
   async findById(id: EvidenceId): Promise<EvidenceItem | null> {

@@ -54,6 +54,7 @@ function githubItem(sourceId: string, content: string): EvidenceItem {
 function repoWith(items: EvidenceItem[]): IEvidenceRepository {
   return {
     create: async () => {},
+    update: async () => true,
     findById: async () => null,
     findByInvestigationId: async () => items,
   };

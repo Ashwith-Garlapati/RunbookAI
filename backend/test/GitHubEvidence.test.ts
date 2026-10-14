@@ -390,6 +390,7 @@ describe("GitHub evidence retrieval", () => {
       create: async (e) => {
         created.push(e);
       },
+      update: async () => true,
       findById: async () => null,
       findByInvestigationId: async () => [],
     };

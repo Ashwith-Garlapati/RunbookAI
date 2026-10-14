@@ -16,6 +16,8 @@ export interface IEvidenceRepository {
   create(evidence: EvidenceItem): Promise<void>;
   findById(id: EvidenceId): Promise<EvidenceItem | null>;
   findByInvestigationId(investigationId: InvestigationId): Promise<EvidenceItem[]>;
+  /** Full-document replace by id. Resolves true when a document matched, false when nothing was found. */
+  update(evidence: EvidenceItem): Promise<boolean>;
 }
 
 export interface IFindingRepository {

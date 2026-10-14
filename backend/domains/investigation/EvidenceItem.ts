@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 
 import type { EvidenceId, InvestigationId } from "./types.js";
 import type { EvidenceSource } from "./EvidenceSource.js";
-import type { Evidence, EvidenceProvenance } from "./Evidence.js";
+import type { Evidence, EvidenceEnrichment, EvidenceProvenance } from "./Evidence.js";
 
 export interface CanonicalEvidenceParams {
   readonly investigationId: InvestigationId;
@@ -42,6 +42,7 @@ export class EvidenceItem implements Evidence {
   readonly provenance: EvidenceProvenance | undefined;
   readonly sourceId: string | undefined;
   readonly hash: string | undefined;
+  readonly enrichment: EvidenceEnrichment | undefined;
 
   /** collectedAt doubles as createdAt (no separate persisted field). */
   get createdAt(): Date {
@@ -65,6 +66,7 @@ export class EvidenceItem implements Evidence {
     this.provenance = props.provenance ? { ...props.provenance } : undefined;
     this.sourceId = props.sourceId;
     this.hash = props.hash;
+    this.enrichment = props.enrichment;
   }
 
   static create(params: {
@@ -118,5 +120,35 @@ export class EvidenceItem implements Evidence {
 
   static reconstitute(props: Evidence): EvidenceItem {
     return new EvidenceItem(props);
+  }
+
+  /**
+   * Returns a copy carrying fresh enrichment. Same id/reference — safe to
+   * persist over the original, and re-running enrichment never duplicates.
+   */
+  withEnrichment(enrichment: EvidenceEnrichment): EvidenceItem {
+    return new EvidenceItem({ ...this.toProps(), enrichment });
+  }
+
+  private toProps(): Evidence {
+    return {
+      id: this.id,
+      investigationId: this.investigationId,
+      source: this.source,
+      type: this.type,
+      reference: this.reference,
+      collectedAt: this.collectedAt,
+      metadata: { ...this.metadata },
+      ...(this.teamId ? { teamId: this.teamId } : {}),
+      ...(this.incidentId ? { incidentId: this.incidentId } : {}),
+      ...(this.title ? { title: this.title } : {}),
+      ...(this.content !== undefined ? { content: this.content } : {}),
+      ...(this.searchableText !== undefined ? { searchableText: this.searchableText } : {}),
+      ...(this.occurredAt ? { occurredAt: this.occurredAt } : {}),
+      ...(this.provenance ? { provenance: { ...this.provenance } } : {}),
+      ...(this.sourceId ? { sourceId: this.sourceId } : {}),
+      ...(this.hash ? { hash: this.hash } : {}),
+      ...(this.enrichment ? { enrichment: this.enrichment } : {}),
+    };
   }
 }
