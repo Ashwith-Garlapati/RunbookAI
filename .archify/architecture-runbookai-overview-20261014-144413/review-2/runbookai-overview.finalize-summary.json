@@ -1,0 +1,100 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "finalize",
+  "status": "pass",
+  "type": "architecture",
+  "quality": "showcase",
+  "specification": {
+    "path": "C:\\Users\\Rams\\OneDrive\\Documents\\RunBook-AI\\.archify\\architecture-runbookai-overview-20261014-144413\\candidate.json",
+    "sha256": "68e41c236004160c887a4f310c37a9436cb9acf50b6387e5edae1334023bbf3a",
+    "bytes": 10939
+  },
+  "artifact": {
+    "path": "C:\\Users\\Rams\\OneDrive\\Documents\\RunBook-AI\\.archify\\architecture-runbookai-overview-20261014-144413\\runbookai-overview.html",
+    "sha256": "b5109d4a7e283d7d57bcd69b0f996c0fb194383eeed2bb5fcd397ffd2faca5ec",
+    "bytes": 872518
+  },
+  "gates": {
+    "validate": "pass",
+    "deliver": "pass",
+    "check": "pass",
+    "browser-check": "pass"
+  },
+  "diagnostics": [],
+  "diagnosticSummary": {
+    "total": 0,
+    "shown": 0,
+    "truncated": false
+  },
+  "evidence": {
+    "receipt": "C:\\Users\\Rams\\OneDrive\\Documents\\RunBook-AI\\.archify\\architecture-runbookai-overview-20261014-144413\\review-2\\runbookai-overview.finalize.json",
+    "summaryReceipt": "C:\\Users\\Rams\\OneDrive\\Documents\\RunBook-AI\\.archify\\architecture-runbookai-overview-20261014-144413\\review-2\\runbookai-overview.finalize-summary.json",
+    "browserCheckReceipt": "C:\\Users\\Rams\\OneDrive\\Documents\\RunBook-AI\\.archify\\architecture-runbookai-overview-20261014-144413\\review-2\\runbookai-overview.browser-check.json"
+  },
+  "update": {
+    "status": "current",
+    "installedVersion": "3.1.0",
+    "availableVersion": "3.1.0",
+    "releaseNotes": null,
+    "checkedAt": "2026-10-14T09:16:32.091Z",
+    "source": "cache",
+    "noticeRequired": false,
+    "noticeText": null
+  },
+  "visualReview": "not-requested",
+  "durationMs": 9779,
+  "visualReviewRecommendation": {
+    "action": "inspect-route-readability",
+    "signals": {
+      "routesOverSuggestedBends": 2
+    },
+    "reason": "Automated gates passed, but crossings or detours still need perceptual review before claiming visual quality.",
+    "affectedRoutes": {
+      "crossings": [],
+      "detours": [
+        {
+          "relationship": {
+            "id": "service-to-github",
+            "from": "investigation-service",
+            "to": "github-retrieval",
+            "label": "session scope",
+            "collectionIndex": 18,
+            "artifactIndex": 19
+          },
+          "bends": 3,
+          "stretch": 1.096
+        },
+        {
+          "relationship": {
+            "id": "slack-to-normalize",
+            "from": "slack-collector",
+            "to": "evidence-normalize",
+            "label": "messages",
+            "collectionIndex": 20,
+            "artifactIndex": 21
+          },
+          "bends": 3,
+          "stretch": 1.115,
+          "directCorridorBlockers": [
+            {
+              "id": "github-retrieval",
+              "label": "GitHub evidence retrieval",
+              "box": [
+                270,
+                500,
+                175,
+                64
+              ]
+            }
+          ]
+        }
+      ],
+      "truncated": false
+    },
+    "hints": [
+      "investigation-service → github-retrieval needs 3 bends: move node investigation-service or github-retrieval so they share a row or column with matching centers, or sit diagonally with a clear corner."
+    ],
+    "repair": "Trace these relationships at the desktop viewport. For Architecture, use references/architecture-layout-repair.md: reflow a blocked main path or tangled connected scene, and repair an isolated defect locally only when the surrounding composition is accepted. Preserve all semantic content and user-fixed geometry. Rerun finalize once after the edit."
+  }
+}

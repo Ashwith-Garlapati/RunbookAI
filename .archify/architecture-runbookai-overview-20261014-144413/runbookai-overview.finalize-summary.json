@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "ok": false,
+  "command": "finalize",
+  "status": "fail",
+  "type": "architecture",
+  "quality": "showcase",
+  "specification": {
+    "path": "C:\\Users\\Rams\\OneDrive\\Documents\\RunBook-AI\\.archify\\architecture-runbookai-overview-20261014-144413\\candidate.json",
+    "sha256": "68e41c236004160c887a4f310c37a9436cb9acf50b6387e5edae1334023bbf3a",
+    "bytes": 10939
+  },
+  "artifact": {
+    "path": "C:\\Users\\Rams\\OneDrive\\Documents\\RunBook-AI\\.archify\\architecture-runbookai-overview-20261014-144413\\runbookai-overview.html",
+    "sha256": "b5109d4a7e283d7d57bcd69b0f996c0fb194383eeed2bb5fcd397ffd2faca5ec",
+    "bytes": 872518
+  },
+  "gates": {
+    "validate": "pass",
+    "deliver": "pass",
+    "check": "pass",
+    "browser-check": "fail"
+  },
+  "failedStage": "browser-check",
+  "diagnostics": [
+    {
+      "code": "viewer/evidence-path-conflict",
+      "severity": "error",
+      "message": "browser-check will not replace the existing unowned evidence path \"C:\\Users\\Rams\\OneDrive\\Documents\\RunBook-AI\\.archify\\architecture-runbookai-overview-20261014-144413\\runbookai-overview.browser-check.json\".",
+      "subject": {
+        "artifact": "C:\\Users\\Rams\\OneDrive\\Documents\\RunBook-AI\\.archify\\architecture-runbookai-overview-20261014-144413\\runbookai-overview.html",
+        "evidencePath": "C:\\Users\\Rams\\OneDrive\\Documents\\RunBook-AI\\.archify\\architecture-runbookai-overview-20261014-144413\\runbookai-overview.browser-check.json"
+      },
+      "evidence": {
+        "reason": {
+          "code": "ownership-artifact-mismatch"
+        }
+      },
+      "supportedFixes": [
+        "move the conflicting file aside, or choose a separate --out-dir, then rerun browser-check"
+      ]
+    }
+  ],
+  "diagnosticSummary": {
+    "total": 1,
+    "shown": 1,
+    "truncated": false
+  },
+  "evidence": {
+    "receipt": "C:\\Users\\Rams\\OneDrive\\Documents\\RunBook-AI\\.archify\\architecture-runbookai-overview-20261014-144413\\runbookai-overview.finalize.json",
+    "summaryReceipt": "C:\\Users\\Rams\\OneDrive\\Documents\\RunBook-AI\\.archify\\architecture-runbookai-overview-20261014-144413\\runbookai-overview.finalize-summary.json",
+    "browserCheckReceipt": "C:\\Users\\Rams\\OneDrive\\Documents\\RunBook-AI\\.archify\\architecture-runbookai-overview-20261014-144413\\runbookai-overview.browser-check.json"
+  },
+  "update": {
+    "status": "current",
+    "installedVersion": "3.1.0",
+    "availableVersion": "3.1.0",
+    "releaseNotes": null,
+    "checkedAt": "2026-10-14T09:16:32.091Z",
+    "source": "cache",
+    "noticeRequired": false,
+    "noticeText": null
+  },
+  "visualReview": "not-requested",
+  "durationMs": 3897
+}

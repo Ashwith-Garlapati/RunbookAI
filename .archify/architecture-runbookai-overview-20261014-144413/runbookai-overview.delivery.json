@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "38fabb13-6e54-448e-8287-1bf391468cfd",
+  "status": "current",
+  "command": "deliver",
+  "type": "architecture",
+  "input": "C:\\Users\\Rams\\OneDrive\\Documents\\RunBook-AI\\.archify\\architecture-runbookai-overview-20261014-144413\\candidate.json",
+  "output": "C:\\Users\\Rams\\OneDrive\\Documents\\RunBook-AI\\.archify\\architecture-runbookai-overview-20261014-144413\\runbookai-overview.html",
+  "specification": {
+    "sha256": "68e41c236004160c887a4f310c37a9436cb9acf50b6387e5edae1334023bbf3a",
+    "bytes": 10939
+  },
+  "artifact": {
+    "sha256": "b5109d4a7e283d7d57bcd69b0f996c0fb194383eeed2bb5fcd397ffd2faca5ec",
+    "bytes": 872518
+  }
+}
